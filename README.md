@@ -44,7 +44,8 @@ add-on. The details are in [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
 ## Results
 
-The game's benchmark, RTX 3060, i7-11700K, 2560x1440. Average fps / lowest 1 %:
+The game's benchmark on an RTX 3060 12 GB (with a small overclock), i7-11700K, 32 GB DDR4 at 2933 MHz, at
+2560x1440. Average fps / lowest 1 %:
 
 | | Native | Ultra Quality | Quality | Balanced | Performance |
 |---|---|---|---|---|---|
