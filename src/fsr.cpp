@@ -139,6 +139,43 @@ void main(uint3 id : SV_DispatchThreadID)
 }
 )";
 
+		// ---- Sharpening pass ----------------------------------------------------------------------------
+
+		// RCAS, the sharpening pass of AMD FidelityFX Super Resolution 1 (ffx_fsr1.h, FsrRcasF; MIT licence,
+		// copyright Advanced Micro Devices, Inc.), without its noise detection. The game runs the same pass after
+		// its own upscale, with strength 0.84. It works on the tonemapped 8-bit colour, as the game's does.
+		// Uses the root signature of the decode pass: t0 and u0 of the table, the first constant.
+		const char kSharpenShader[] = R"(
+Texture2D<float4> source : register(t0);
+RWTexture2D<float4> target : register(u0);
+cbuffer constants : register(b0)
+{
+	float strength; // 0..1, scales the negative lobe
+};
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+	uint width, height;
+	source.GetDimensions(width, height);
+	const int2 p = int2(id.xy), last = int2(width, height) - 1;
+	const float4 centre = source[p];
+	const float3 b = source[clamp(p + int2(0, -1), 0, last)].rgb;
+	const float3 d = source[clamp(p + int2(-1, 0), 0, last)].rgb;
+	const float3 e = centre.rgb;
+	const float3 f = source[clamp(p + int2(1, 0), 0, last)].rgb;
+	const float3 h = source[clamp(p + int2(0, 1), 0, last)].rgb;
+
+	const float3 lowest = min(min(b, d), min(f, h)), highest = max(max(b, d), max(f, h));
+	// The strongest lobe that keeps the result between the lowest and the highest neighbour
+	const float3 hit_min = min(lowest, e) / max(4.0 * highest, 1e-6);
+	const float3 hit_max = (1.0 - max(highest, e)) / min(4.0 * lowest - 4.0, -1e-6);
+	const float3 lobe3 = max(-hit_min, hit_max);
+	const float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * strength;
+	target[id.xy] = float4((lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0), centre.a);
+}
+)";
+
 		D3D12_RESOURCE_BARRIER transition(ID3D12Resource *resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
 		{
 			D3D12_RESOURCE_BARRIER barrier = {};
@@ -223,9 +260,18 @@ void main(uint3 id : SV_DispatchThreadID)
 			return false;
 		}
 
+		// The sharpening pass shares the root signature. Without it the upscaler still works.
+		ComPtr<ID3DBlob> sharpen_shader;
+		pipeline_desc.CS = {};
+		if (SUCCEEDED(D3DCompile(kSharpenShader, sizeof(kSharpenShader) - 1, "acv_sharpen", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &sharpen_shader, &error)))
+			pipeline_desc.CS = { sharpen_shader->GetBufferPointer(), sharpen_shader->GetBufferSize() };
+		if (pipeline_desc.CS.pShaderBytecode == nullptr || FAILED(device->CreateComputePipelineState(&pipeline_desc, IID_PPV_ARGS(&_sharpen_pipeline))))
+			log::warn("FSR: sharpening pass could not be created, the picture stays unsharpened: %s", sharpen_shader == nullptr && error != nullptr ? static_cast<const char *>(error->GetBufferPointer()) : "pipeline");
+
+		// Two tables per dispatch: decode, then sharpening
 		D3D12_DESCRIPTOR_HEAP_DESC heap_desc = {};
 		heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-		heap_desc.NumDescriptors = kRing * kDecodeDescriptors;
+		heap_desc.NumDescriptors = kRing * kDecodeDescriptors * 2;
 		heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		if (FAILED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&_heap))))
 		{
@@ -365,9 +411,9 @@ void main(uint3 id : SV_DispatchThreadID)
 				{
 					SYSTEMTIME time;
 					GetLocalTime(&time);
-					std::fprintf(file, "%04u-%02u-%02u %02u:%02u:%02u  %s  %ux%u -> %ux%u  game sharpening %s  %.2f ms average, %.2f ms longest, %u frames\n",
+					std::fprintf(file, "%04u-%02u-%02u %02u:%02u:%02u  %s  %ux%u -> %ux%u  game sharpening %s, own %.0f %%  %.2f ms average, %.2f ms longest, %u frames\n",
 						time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, _provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height,
-						settings::get().game_sharpening ? "on" : "off", _timer_ms, _timer_max_ms, kTimerWindow);
+						settings::game_sharpening() ? "on" : "off", static_cast<double>(_sharpness) * 100.0, _timer_ms, _timer_max_ms, kTimerWindow);
 					std::fclose(file);
 				}
 				_timer_count = 0;
@@ -454,8 +500,20 @@ void main(uint3 id : SV_DispatchThreadID)
 
 		begin_timer(device, list);
 
+		// Own sharpening: the upscaler writes an intermediate texture and the sharpening pass writes the result
+		bool sharpen = inputs.sharpness > 0.0f && _sharpen_pipeline != nullptr;
+		if (sharpen && _set.presharp == nullptr && !create_texture(device, inputs.out_width, inputs.out_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, _set.presharp))
+		{
+			if (!_sharpen_failed)
+				log::warn("FSR: texture for the sharpening pass could not be created, the picture stays unsharpened");
+			_sharpen_failed = true;
+			sharpen = false;
+		}
+		_sharpness = sharpen ? inputs.sharpness : 0.0f;
+		ID3D12Resource *const result_texture = inputs.output != nullptr ? inputs.output : _set.output.Get();
+
 		// ---- Decode pass: velocity, distance and mask -> motion vectors, depth and reactive mask ----
-		const uint32_t base = (_ring_next++ % kRing) * kDecodeDescriptors;
+		const uint32_t base = (_ring_next++ % kRing) * kDecodeDescriptors * 2;
 		D3D12_CPU_DESCRIPTOR_HANDLE cpu = _heap->GetCPUDescriptorHandleForHeapStart();
 		cpu.ptr += static_cast<SIZE_T>(base) * _heap_increment;
 		D3D12_GPU_DESCRIPTOR_HANDLE gpu = _heap->GetGPUDescriptorHandleForHeapStart();
@@ -529,8 +587,17 @@ void main(uint3 id : SV_DispatchThreadID)
 			const DWORD length = GetEnvironmentVariableA("ACV_TEST_RESET_AT", text, sizeof(text));
 			return length != 0 && length < sizeof(text) ? std::strtoull(text, nullptr, 10) : 0ull;
 		}();
-		const bool reset = _reset || inputs.frame > _last_frame + 1 || (s_test_reset_at != 0 && _dispatches == s_test_reset_at);
+		const bool reset = _reset || inputs.reset || inputs.frame > _last_frame + 1 || (s_test_reset_at != 0 && _dispatches == s_test_reset_at);
 		_last_frame = inputs.frame;
+
+		// Whether the game ever raises its flag, in the log: every change, up to a limit
+		_game_resets += inputs.reset ? 1 : 0;
+		if (inputs.reset != _last_game_reset && _transitions_logged < 200)
+		{
+			++_transitions_logged;
+			log::write("FSR: frame %llu: history %s by the game (%llu frames without history so far)", inputs.frame, inputs.reset ? "dropped" : "kept", _game_resets);
+		}
+		_last_game_reset = inputs.reset;
 
 		const float width = static_cast<float>(inputs.width), height = static_cast<float>(inputs.height);
 		ffxDispatchDescUpscale desc = {};
@@ -541,7 +608,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		desc.motionVectors = ffxApiGetResourceDX12(_set.motion.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
 		if (use_mask)
 			desc.reactive = ffxApiGetResourceDX12(_set.reactive.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-		desc.output = ffxApiGetResourceDX12(inputs.output != nullptr ? inputs.output : _set.output.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+		desc.output = ffxApiGetResourceDX12(sharpen ? _set.presharp.Get() : result_texture, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
 		desc.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
 		desc.motionVectorScale = { width, height }; // The decoded vectors are in UV units
 		desc.renderSize = { inputs.width, inputs.height };
@@ -558,6 +625,33 @@ void main(uint3 id : SV_DispatchThreadID)
 		desc.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
 
 		const ffxReturnCode_t result = ffx_api().dispatch(&_set.context, &desc.header);
+
+		// ---- Sharpening pass: intermediate texture -> result ----
+		if (sharpen && result == FFX_API_RETURN_OK)
+		{
+			// Every descriptor of the table is written: not all hardware accepts unwritten ones
+			write_srv(_set.presharp.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+			write_srv(nullptr, DXGI_FORMAT_R8G8B8A8_UNORM);
+			write_srv(nullptr, DXGI_FORMAT_R8G8B8A8_UNORM);
+			write_uav(result_texture, DXGI_FORMAT_R8G8B8A8_UNORM);
+			write_uav(nullptr, DXGI_FORMAT_R8G8B8A8_UNORM);
+			write_uav(nullptr, DXGI_FORMAT_R8G8B8A8_UNORM);
+			D3D12_GPU_DESCRIPTOR_HANDLE sharpen_gpu = gpu;
+			sharpen_gpu.ptr += static_cast<UINT64>(kDecodeDescriptors) * _heap_increment;
+
+			const D3D12_RESOURCE_BARRIER to_source = transition(_set.presharp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			list->ResourceBarrier(1, &to_source);
+			// FSR left its own heaps, root signature and pipeline on the list
+			float sharpen_constants[kDecodeConstants] = { inputs.sharpness };
+			list->SetDescriptorHeaps(1, heaps);
+			list->SetComputeRootSignature(_root_signature.Get());
+			list->SetPipelineState(_sharpen_pipeline.Get());
+			list->SetComputeRoot32BitConstants(0, kDecodeConstants, sharpen_constants, 0);
+			list->SetComputeRootDescriptorTable(1, sharpen_gpu);
+			list->Dispatch((inputs.out_width + 7) / 8, (inputs.out_height + 7) / 8, 1);
+			const D3D12_RESOURCE_BARRIER to_target = transition(_set.presharp.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+			list->ResourceBarrier(1, &to_target);
+		}
 
 		const D3D12_RESOURCE_BARRIER to_rest[4] = {
 			transition(_set.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
@@ -639,6 +733,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		_reset = true;
 		_dispatches = 0;
 		_pipeline.Reset();
+		_sharpen_pipeline.Reset();
 		_root_signature.Reset();
 		_heap.Reset();
 		_timer_open = false;
@@ -658,6 +753,10 @@ void main(uint3 id : SV_DispatchThreadID)
 			append_format(text, "%s, %ux%u -> %ux%u, %llu frames", _provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height, _dispatches);
 			if (_timer_ms > 0.0)
 				append_format(text, ", GPU %.2f ms", _timer_ms);
+			if (_sharpness > 0.0f)
+				append_format(text, ", own sharpening %.0f %%", static_cast<double>(_sharpness) * 100.0);
+			if (_game_resets != 0)
+				append_format(text, ", %llu history resets by the game", _game_resets);
 		}
 		else
 			text = "not started";

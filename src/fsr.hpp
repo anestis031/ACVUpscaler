@@ -36,6 +36,10 @@ namespace acv
 			// kViewSkyRows of the view constants, in that order), as in the TAA of the game
 			float sky_rows[11][4] = {};
 			float sky_distance = 3.0e38f;
+			// The add-on's own sharpening pass after the upscaler: 0 none, 1 the strongest. Only where the game's
+			// sharpening pass does not follow.
+			float sharpness = 0.0f;
+			bool reset = false;                     // The game's TAA would not use its history in this frame (camera cut)
 			uint64_t frame = 0;
 		};
 
@@ -77,11 +81,12 @@ namespace acv
 			uint32_t width = 0, height = 0, out_width = 0, out_height = 0;
 			void *context = nullptr; // ffxContext
 			Microsoft::WRL::ComPtr<ID3D12Resource> motion, depth, reactive, output;
+			Microsoft::WRL::ComPtr<ID3D12Resource> presharp; // What the upscaler writes when the sharpening pass follows. Created when first needed.
 			uint64_t retired_frame = 0;
 		};
 
 		static constexpr uint32_t kRing = 8; // Frames before a descriptor slot is reused
-		static constexpr uint32_t kDecodeDescriptors = 6; // Three inputs, three outputs
+		static constexpr uint32_t kDecodeDescriptors = 6; // Three inputs, three outputs: the table of the decode pass and of the sharpening pass
 		static constexpr uint32_t kDecodeConstants = 52;  // Floats of the constant block of the decode shader
 
 		bool create_decode_pass(ID3D12Device *device);
@@ -93,6 +98,9 @@ namespace acv
 		bool _decode_failed = false;
 		Microsoft::WRL::ComPtr<ID3D12RootSignature> _root_signature;
 		Microsoft::WRL::ComPtr<ID3D12PipelineState> _pipeline;
+		Microsoft::WRL::ComPtr<ID3D12PipelineState> _sharpen_pipeline; // Null: the sharpening pass could not be created
+		bool _sharpen_failed = false;
+		float _sharpness = 0.0f; // Of the last dispatch, for the status line
 		Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> _heap;
 		uint32_t _heap_increment = 0;
 		uint32_t _ring_next = 0;
@@ -105,6 +113,9 @@ namespace acv
 		uint64_t _last_frame = 0;
 		int64_t _last_time = 0;
 		uint64_t _dispatches = 0;
+		uint64_t _game_resets = 0; // Frames with 'Inputs::reset'
+		bool _last_game_reset = false;
+		uint32_t _transitions_logged = 0;
 		std::string _provider;
 		std::string _error;
 

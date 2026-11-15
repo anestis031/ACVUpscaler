@@ -7,6 +7,8 @@ Replaces the anti-aliasing and the FSR 1 upscale of **Assassin's Creed Valhalla*
 > Single-player only, at your own risk.
 
 Comparison video (4K, watch at 2160p): https://www.youtube.com/watch?v=j24VcwrQKlU
+Recorded with 1.0.0-beta.1: unless a label says otherwise, every upscaled setting has the game's fixed sharpening
+pass on top, which leaves DLSS and FSR 3.1 sharper than FSR 1. Since beta.2 the strength can be set.
 
 ## Install
 

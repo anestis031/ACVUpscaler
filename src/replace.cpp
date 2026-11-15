@@ -129,14 +129,13 @@ namespace acv
 				native->SetPipelineState(reinterpret_cast<ID3D12PipelineState *>(static_cast<uintptr_t>(list.pipeline)));
 		}
 
-		// Runs FSR on the inputs of the TAA draw 'taa' and puts the result into 'targets', which all have the
-		// size of the result and are in 'target_state'. 'bound' and 'list' describe the call being replaced.
-		bool run_fsr(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &bound, const replace::ListState &list,
-			const api::resource *targets, uint32_t target_count, api::resource_usage target_state)
+		// Everything FSR needs from the TAA draw 'taa', except where the result goes.
+		// False: this draw cannot be replaced, and the game's own passes have to run.
+		bool gather_inputs(api::device *device, DeviceData &data, const PassRecord &taa, Fsr::Inputs &inputs)
 		{
 			const api::resource colour = input_texture(taa, kColourInput), velocity = input_texture(taa, kVelocityInput), depth = input_texture(taa, kDepthInput);
-			if (colour == 0 || velocity == 0 || depth == 0)
-				return fail("colour, velocity or depth (t0..t2) could not be resolved");
+			if (colour == 0 || depth == 0)
+				return fail("colour or depth (t0, t2) could not be resolved");
 			if (taa.taa_constants_result != ReadResult::Ok || taa.view_constants_result != ReadResult::Ok)
 				return fail("the TAA or view constants could not be read");
 
@@ -147,9 +146,29 @@ namespace acv
 			if (!(cot_half_fov > 0.01f) || !(depth_b > 0.0f) || !(depth_a >= 0.0f))
 				return fail("the projection in the view constants does not look like the known layout");
 
-			const api::resource_desc colour_desc = device->get_resource_desc(colour), target_desc = device->get_resource_desc(targets[0]);
+			const api::resource_desc colour_desc = device->get_resource_desc(colour), depth_desc = device->get_resource_desc(depth);
+			// At a camera cut of a cutscene the velocity input is not the velocity texture for one frame (seen in the
+			// game, docs/TECHNICAL.md). Such a frame is left to the game; the frame gap then makes the upscaler drop its history.
+			const api::resource_desc velocity_desc = velocity != 0 ? device->get_resource_desc(velocity) : api::resource_desc();
+			if (velocity == 0 || velocity_desc.texture.width != colour_desc.texture.width || velocity_desc.texture.height != colour_desc.texture.height ||
+				api::format_to_typeless(velocity_desc.texture.format) != api::format_to_typeless(api::format::r8g8b8a8_unorm))
+			{
+				static std::atomic<uint32_t> s_logged { 0 };
+				if (s_logged.fetch_add(1, std::memory_order_relaxed) < 50)
+				{
+					char format[16], found[64] = "not a texture the add-on knows";
+					if (velocity != 0)
+						sprintf_s(found, "%ux%u %s", velocity_desc.texture.width, velocity_desc.texture.height, format_name(velocity_desc.texture.format, format));
+					log::write("frame %llu left to the game: its velocity input (t1) is %s (colour %ux%u)", data.frame_index.load(std::memory_order_relaxed) + 1,
+						found, colour_desc.texture.width, colour_desc.texture.height);
+				}
+				return false;
+			}
+			if (api::format_to_typeless(colour_desc.texture.format) != api::format_to_typeless(api::format::r8g8b8a8_unorm) ||
+				api::format_to_typeless(depth_desc.texture.format) != api::format_to_typeless(api::format::r32_float) ||
+				depth_desc.texture.width != colour_desc.texture.width || depth_desc.texture.height != colour_desc.texture.height)
+				return fail("colour or depth (t0, t2) do not have the known format or size");
 
-			Fsr::Inputs inputs;
 			inputs.colour = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(colour.handle));
 			inputs.velocity = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(velocity.handle));
 			inputs.linear_depth = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(depth.handle));
@@ -157,8 +176,6 @@ namespace acv
 			inputs.reactive_gain = data.fsr_reactive_gain.load(std::memory_order_relaxed);
 			inputs.width = colour_desc.texture.width;
 			inputs.height = colour_desc.texture.height;
-			inputs.out_width = target_desc.texture.width;
-			inputs.out_height = target_desc.texture.height;
 			// The game's jitter in pixels (TAA constants row 3) has the convention FSR documents: the projection is
 			// shifted by (+2 jx / W, -2 jy / H). Confirmed by the automatic test (docs/TECHNICAL.md); the switches stay for tests.
 			inputs.jitter_x = taa.taa_constants[3][0] * (data.fsr_flip_jitter_x.load(std::memory_order_relaxed) ? -1.0f : 1.0f);
@@ -181,7 +198,31 @@ namespace acv
 					inputs.sky_distance = (c6[0] - c6[1]) / denominator;
 				}
 			}
+
+			// Row 0 of the TAA constants is an integer: zero when the game's TAA must not use its history (its
+			// shaders skip the history then). Compared as an integer: 1 read as a float is a denormal.
+			uint32_t history_valid = 0;
+			std::memcpy(&history_valid, &taa.taa_constants[0][0], sizeof(history_valid));
+			inputs.reset = history_valid == 0;
+
 			inputs.frame = data.frame_index.load(std::memory_order_relaxed) + 1;
+			return true;
+		}
+
+		// Runs FSR on the inputs of the TAA draw 'taa' and puts the result into 'targets', which all have the
+		// size of the result and are in 'target_state'. 'bound' and 'list' describe the call being replaced.
+		bool run_fsr(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &bound, const replace::ListState &list,
+			const api::resource *targets, uint32_t target_count, api::resource_usage target_state)
+		{
+			Fsr::Inputs inputs;
+			if (!gather_inputs(device, data, taa, inputs))
+				return false;
+			const api::resource_desc target_desc = device->get_resource_desc(targets[0]);
+			inputs.out_width = target_desc.texture.width;
+			inputs.out_height = target_desc.texture.height;
+			// Own sharpening wherever the game's sharpening pass does not follow: not when this takes the place of EASU
+			if (bound.kind != Kind::Fsr1Easu)
+				inputs.sharpness = static_cast<float>(settings::sharpness()) / 100.0f;
 
 			ID3D12Device *const native_device = reinterpret_cast<ID3D12Device *>(static_cast<uintptr_t>(device->get_native()));
 			ID3D12GraphicsCommandList *const native_list = reinterpret_cast<ID3D12GraphicsCommandList *>(static_cast<uintptr_t>(cmd_list->get_native()));
@@ -239,10 +280,15 @@ namespace acv
 			return passthrough(cmd_list, device, data, taa, list, true) ? Result::Applied : Result::NotApplied;
 		case ReplaceMode::Fsr:
 			// With the game's FSR 1 on (seen in the previous frame), FSR 3.1 runs at the EASU or RCAS dispatch instead.
-			// The TAA output still gets the current colour, for whatever else reads it. The history does not:
-			// only the TAA draws read it (every pass of the captured frame checked, docs/TECHNICAL.md), and they are skipped.
+			// The TAA output still gets the current colour, for whatever else reads it. So does the history: only
+			// the TAA draws read it (every pass of the captured frame checked, docs/TECHNICAL.md), and the game's own run
+			// in the frames that are left to it. Without the copy they would blend in what the memory happened to hold.
+			// Inputs that FSR could not use are found here, while the game's TAA can still run instead.
 			if (data.game_fsr1_seen.load(std::memory_order_relaxed))
-				return passthrough(cmd_list, device, data, taa, list, false) ? Result::Deferred : Result::NotApplied;
+			{
+				Fsr::Inputs probe;
+				return gather_inputs(device, data, taa, probe) && passthrough(cmd_list, device, data, taa, list, true) ? Result::Deferred : Result::NotApplied;
+			}
 			return fsr_native(cmd_list, device, data, taa, list) ? Result::Applied : Result::NotApplied;
 		default:
 			return Result::NotApplied;

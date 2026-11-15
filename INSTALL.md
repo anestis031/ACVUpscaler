@@ -20,7 +20,11 @@
    - **Particle mask strength**: how strongly FSR 3.1 is told about rain and fire. 4 is the tested default.
    - **Sharper textures**: a texture LOD bias that matches the render resolution. Leave it on.
    - **Sharpening pass of the game on top**: the game sharpens the picture after its FSR 1 upscale (RCAS), and
-     by default it still does so after FSR 3.1 or DLSS. Off gives a softer picture and saves that pass.
+     by default it still does so after FSR 3.1 or DLSS. On top of DLSS that is more sharpening than the picture
+     needs. Switch it off to set the strength yourself:
+   - **Own sharpening instead**: 0 to 100. The add-on then runs the same kind of pass with your strength; 0 is
+     no sharpening at all, 84 is what the game does. Both sharpening settings can also be changed while
+     playing: **Home** key, **Add-ons** tab. What you set there is kept.
 5. Press **Install / Apply**. The tool shows the list of files it will add, replace or remove and asks before
    it does anything. With DLSS it downloads `nvngx_dlss.dll` (about 59 MB) from NVIDIA's GitHub repository.
 6. Start the game. FidelityFX Super Resolution is on in its graphics options with the quality you picked in
@@ -88,6 +92,7 @@ DLSS with the Steam overlay, in addition:
 | `ReactiveGain` | 0 to 64, default 4 | Strength of the particle mask given to FSR 3.1; 0 gives none |
 | `LodBias` | 1 or 0 | Texture LOD bias from the render resolution |
 | `GameSharpening` | 1 or 0 | 1: the game's sharpening pass runs on top of the upscaler. 0: it is skipped |
+| `Sharpness` | 0 to 100, default 0 | Strength of the add-on's own sharpening pass. Used with `GameSharpening=0`, and at native resolution |
 | `KeepContexts` | 0 or 1 | 1 with OptiScaler as `winmm.dll`: old upscaler instances are not destroyed |
 | `DevMode` | 0 or 1 | Developer tools: keys F6 to F10, snapshots, detailed log |
 | `RenderScale` | written by the add-on | Render scale of the last session, used for the LOD bias |

@@ -73,12 +73,15 @@ pub struct Choice {
     pub lod_bias: bool,
     /// The sharpening pass (RCAS) of the game on top of the upscaler
     pub game_sharpening: bool,
+    /// Strength in percent of the add-on's own sharpening pass, which runs where the game's does not: with
+    /// `game_sharpening` off and at native resolution. 0: none, 84: the strength of the game's pass.
+    pub sharpness: u32,
     pub dev_mode: bool,
 }
 
 impl Default for Choice {
     fn default() -> Self {
-        Choice { upscaler: Upscaler::Fsr31, model: Model::K, overlay: Overlay::Steam, gain: 4, lod_bias: true, game_sharpening: true, dev_mode: false }
+        Choice { upscaler: Upscaler::Fsr31, model: Model::K, overlay: Overlay::Steam, gain: 4, lod_bias: true, game_sharpening: true, sharpness: 0, dev_mode: false }
     }
 }
 
@@ -312,6 +315,7 @@ fn write_settings(game: &Path, payload: &Path, choice: &Choice, manifest: &mut M
     sys::ini_set(&addon_ini, section, "ReactiveGain", Some(&choice.gain.to_string()))?;
     sys::ini_set(&addon_ini, section, "LodBias", Some(bool_text(choice.lod_bias)))?;
     sys::ini_set(&addon_ini, section, "GameSharpening", Some(bool_text(choice.game_sharpening)))?;
+    sys::ini_set(&addon_ini, section, "Sharpness", Some(&choice.sharpness.to_string()))?;
     sys::ini_set(&addon_ini, section, "KeepContexts", Some(bool_text(keep_contexts)))?;
     sys::ini_set(&addon_ini, section, "DevMode", Some(bool_text(choice.dev_mode)))?;
     manifest.files.insert(ADDON_INI.into(), "-".into());
@@ -550,6 +554,7 @@ pub fn read_choice(game: &Path) -> Choice {
     }
     choice.lod_bias = get("LodBias") != "0";
     choice.game_sharpening = get("GameSharpening") != "0";
+    choice.sharpness = get("Sharpness").parse::<u32>().unwrap_or(0).min(100);
     choice.dev_mode = get("DevMode") == "1";
     choice
 }
@@ -581,6 +586,10 @@ pub fn command_line(game: &Path, game_settings: Option<&GameSettings>) -> String
     }
     if !choice.game_sharpening {
         args.push("--no-game-sharpening");
+    }
+    let sharpness = choice.sharpness.to_string();
+    if choice.sharpness != 0 {
+        args.extend(["--sharpness", sharpness.as_str()]);
     }
     if choice.dev_mode {
         args.push("--dev");
@@ -756,7 +765,7 @@ mod tests {
         assert_eq!(read_choice(&sandbox.game).model, Model::K);
 
         // To the layout with OptiScaler's menu: the two DLLs change places, winmm.dll goes
-        let menu = Choice { overlay: Overlay::OptiMenu, model: Model::M, game_sharpening: false, ..steam };
+        let menu = Choice { overlay: Overlay::OptiMenu, model: Model::M, game_sharpening: false, sharpness: 30, ..steam };
         let plan: Vec<Action> = plan_install(&sandbox.game, &sandbox.payload, &menu, None).unwrap().into_iter().filter(|a| !matches!(a, Action::Download { .. })).collect();
         apply_install(&sandbox.game, &sandbox.payload, &menu, &plan, None, &|_| unreachable!()).unwrap();
         assert_eq!(fs::read(sandbox.game.join("dxgi.dll")).unwrap(), b"content of OptiScaler.dll".to_vec());
@@ -765,7 +774,7 @@ mod tests {
         assert_eq!(sys::ini_get(&opti_ini, "Plugins", "LoadReshade"), "true");
         assert_eq!(sys::ini_get(&sandbox.game.join(ADDON_INI), "ACVUpscaler", "KeepContexts"), "0");
         assert_eq!(read_choice(&sandbox.game), Choice { ..menu });
-        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler dlss --model m --overlay menu --gain 4 --no-game-sharpening");
+        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler dlss --model m --overlay menu --gain 4 --no-game-sharpening --sharpness 30");
 
         // To FSR 3.1 only: OptiScaler and its settings go
         sandbox.install(&fsr()).unwrap();

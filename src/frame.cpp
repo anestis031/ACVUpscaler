@@ -41,6 +41,8 @@ namespace acv
 
 			// The TAA output of this list was written by replace.cpp, so its TAA draws are skipped
 			bool taa_replaced = false;
+			// A TAA draw of this list could not be replaced: the game's own TAA and FSR 1 run for all of it
+			bool taa_declined = false;
 			// FSR 3.1 is to run at the EASU dispatch of this list, with the inputs of this TAA draw
 			bool taa_pending_valid = false;
 			PassRecord taa_pending;
@@ -61,6 +63,7 @@ namespace acv
 				dsv = { 0 };
 				viewport_valid = false;
 				taa_replaced = false;
+				taa_declined = false;
 				taa_pending_valid = false;
 				graphics.clear();
 				compute.clear();
@@ -450,10 +453,13 @@ namespace acv
 					const ReplaceMode mode = static_cast<ReplaceMode>(data.replace_mode.load(std::memory_order_relaxed));
 					if (mode != ReplaceMode::GameTaa)
 					{
-						if (!state.taa_replaced)
+						if (!state.taa_replaced && !state.taa_declined)
 						{
 							const replace::Result result = replace::at_taa(mode, cmd_list, device, data, record, list_state(state));
 							state.taa_replaced = result != replace::Result::NotApplied;
+							state.taa_declined = !state.taa_replaced;
+							if (state.taa_declined)
+								data.declined_lists.fetch_add(1, std::memory_order_relaxed);
 							if (result == replace::Result::Deferred)
 							{
 								state.taa_pending = record;
@@ -472,7 +478,7 @@ namespace acv
 				{
 					// FSR 3.1 takes the place of EASU, with the inputs of the TAA draws skipped earlier in this list.
 					// Without the game's sharpening it takes the place of RCAS, and EASU is only skipped.
-					if (kind == Kind::Fsr1Easu && !settings::get().game_sharpening && !data.rcas_replace_failed.load(std::memory_order_relaxed))
+					if (kind == Kind::Fsr1Easu && !settings::game_sharpening() && !data.rcas_replace_failed.load(std::memory_order_relaxed))
 					{
 						skip = true;
 					}

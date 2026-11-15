@@ -6,7 +6,7 @@
 #   external\OptiScaler_0.9.4\Optiscaler_0.9.4-final.20260718._MM.7z   from the OptiScaler v0.9.4 release
 #   external\FidelityFX-SDK\Kits\FidelityFX\signedbin\     from the FidelityFX SDK v2.4.0
 # Needs tar.exe of Windows 11 (reads .7z and the ReShade setup), the MSVC build of the add-on and cargo.
-param([string]$Version = "1.0.0-beta.1", [switch]$SkipBuild, [string]$Dist = "")
+param([string]$Version = "1.0.0-beta.2", [switch]$SkipBuild, [string]$Dist = "")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 $tar = "$env:SystemRoot\System32\tar.exe"

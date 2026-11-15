@@ -45,6 +45,7 @@ const ID_OPEN: usize = 112;
 const ID_CLOSE: usize = 113;
 const ID_QUALITY: usize = 114;
 const ID_SHARPEN: usize = 115;
+const ID_SHARPNESS: usize = 119;
 
 struct App {
     window: HWND,
@@ -60,6 +61,8 @@ struct App {
     gain: HWND,
     lod: HWND,
     sharpen: HWND,
+    sharpness_label: HWND,
+    sharpness: HWND,
     dev: HWND,
     apply: HWND,
     uninstall: HWND,
@@ -141,6 +144,7 @@ impl App {
             gain: unsafe { SendMessageW(self.gain, TBM_GETPOS, 0, 0) } as u32,
             lod_bias: checked(self.lod),
             game_sharpening: checked(self.sharpen),
+            sharpness: unsafe { SendMessageW(self.sharpness, TBM_GETPOS, 0, 0) } as u32,
             dev_mode: checked(self.dev),
         }
     }
@@ -169,6 +173,7 @@ impl App {
         unsafe {
             SendMessageW(self.model, CB_SETCURSEL, index, 0);
             SendMessageW(self.gain, TBM_SETPOS, 1, choice.gain as isize);
+            SendMessageW(self.sharpness, TBM_SETPOS, 1, choice.sharpness as isize);
         }
         self.update_enabled();
     }
@@ -184,10 +189,16 @@ impl App {
             for control in [self.dlss, self.fsr, self.off, self.gain, self.lod, self.sharpen, self.dev, self.apply] {
                 EnableWindow(control, i32::from(have_game));
             }
+            // The add-on's own sharpening takes the place of the game's pass
+            EnableWindow(self.sharpness, i32::from(have_game && !checked(self.sharpen)));
             EnableWindow(self.uninstall, i32::from(self.game.as_deref().is_some_and(core::is_installed)));
             EnableWindow(self.quality, i32::from(have_game && self.settings.is_some()));
         }
         set_text(self.gain_label, &format!("Particle mask strength (rain, fire): {}", unsafe { SendMessageW(self.gain, TBM_GETPOS, 0, 0) }));
+        set_text(
+            self.sharpness_label,
+            &format!("Own sharpening instead (0 none, 84 like the game): {}", unsafe { SendMessageW(self.sharpness, TBM_GETPOS, 0, 0) }),
+        );
 
         let choice = self.choice();
         let mut summary = core::summary(&choice, self.chosen_quality(), self.settings.as_ref());
@@ -408,24 +419,27 @@ unsafe fn create_controls(window: HWND) -> App {
     let gain = c(w!("msctls_trackbar32"), "", TBS_AUTOTICKS | WS_TABSTOP, 0, (316, 318, 256, 28), ID_GAIN);
     SendMessageW(gain, TBM_SETRANGE, 1, (16 << 16) as isize);
     let lod = c(w!("BUTTON"), "Sharper textures (texture LOD bias matched to the render quality)", check, 0, (12, 350, 560, 20), ID_LOD);
-    let sharpen = c(w!("BUTTON"), "Sharpening pass of the game on top (off: softer picture, slightly faster)", check, 0, (12, 373, 560, 20), ID_SHARPEN);
-    let dev = c(w!("BUTTON"), "Developer tools (keys F6 to F10 in the game, detailed log)", check, 0, (12, 396, 560, 20), ID_DEV);
+    let sharpen = c(w!("BUTTON"), "Sharpening pass of the game on top (off: the slider below decides)", check, 0, (12, 373, 560, 20), ID_SHARPEN);
+    let sharpness_label = c(w!("STATIC"), "", 0, 0, (30, 400, 290, 18), 0);
+    let sharpness = c(w!("msctls_trackbar32"), "", WS_TABSTOP, 0, (316, 396, 256, 24), ID_SHARPNESS);
+    SendMessageW(sharpness, TBM_SETRANGE, 1, (100 << 16) as isize);
+    let dev = c(w!("BUTTON"), "Developer tools (keys F6 to F10 in the game, detailed log)", check, 0, (12, 424, 560, 20), ID_DEV);
 
     // What the choices above amount to, and what needs a restart of the game
-    let summary = c(w!("STATIC"), "", 0, WS_EX_STATICEDGE, (12, 425, 560, 54), 0);
-    let notes = c(w!("STATIC"), "", 0, 0, (12, 485, 560, 52), 0);
+    let summary = c(w!("STATIC"), "", 0, WS_EX_STATICEDGE, (12, 453, 560, 54), 0);
+    let notes = c(w!("STATIC"), "", 0, 0, (12, 513, 560, 52), 0);
 
-    let apply = c(w!("BUTTON"), "Install / Apply", push | BS_DEFPUSHBUTTON as u32, 0, (12, 543, 150, 28), ID_APPLY);
-    let uninstall = c(w!("BUTTON"), "Uninstall", push, 0, (170, 543, 110, 28), ID_UNINSTALL);
-    c(w!("BUTTON"), "Open game folder", push, 0, (288, 543, 150, 28), ID_OPEN);
-    c(w!("BUTTON"), "Close", push, 0, (462, 543, 110, 28), ID_CLOSE);
+    let apply = c(w!("BUTTON"), "Install / Apply", push | BS_DEFPUSHBUTTON as u32, 0, (12, 571, 150, 28), ID_APPLY);
+    let uninstall = c(w!("BUTTON"), "Uninstall", push, 0, (170, 571, 110, 28), ID_UNINSTALL);
+    c(w!("BUTTON"), "Open game folder", push, 0, (288, 571, 150, 28), ID_OPEN);
+    c(w!("BUTTON"), "Close", push, 0, (462, 571, 110, 28), ID_CLOSE);
 
     let log = c(
         w!("EDIT"),
         "",
         ES_READONLY as u32 | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL,
         WS_EX_CLIENTEDGE,
-        (12, 581, 560, 110),
+        (12, 609, 560, 110),
         0,
     );
 
@@ -443,6 +457,8 @@ unsafe fn create_controls(window: HWND) -> App {
         gain,
         lod,
         sharpen,
+        sharpness_label,
+        sharpness,
         dev,
         apply,
         uninstall,
@@ -537,12 +553,12 @@ fn run_window() {
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut rect = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: (584.0 * scale) as i32, bottom: (703.0 * scale) as i32 };
+        let mut rect = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: (584.0 * scale) as i32, bottom: (731.0 * scale) as i32 };
         AdjustWindowRect(&mut rect, style, 0);
         let window = CreateWindowExW(
             0,
             w!("ACVUpscalerSetup"),
-            w!("ACVUpscaler Setup 1.0.0-beta.1"),
+            w!("ACVUpscaler Setup 1.0.0-beta.2"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -570,7 +586,7 @@ fn run_window() {
 /// `--game-dir <dir> --install|--uninstall|--show [options]`: no window, the result goes to `--log <file>`.
 /// `--show` changes nothing and reports the present installation as the options that would recreate it.
 /// Options: `--payload <dir>`, `--upscaler dlss|fsr31|off`, `--model k|m|default`, `--overlay steam|menu`,
-/// `--gain <0..16>`, `--no-lod-bias`, `--no-game-sharpening`, `--dev`, `--dlss-file <file>` (use this copy instead of downloading),
+/// `--gain <0..16>`, `--no-lod-bias`, `--no-game-sharpening`, `--sharpness <0..100>` (the add-on's own sharpening), `--dev`, `--dlss-file <file>` (use this copy instead of downloading),
 /// `--quality uq|quality|balanced|performance` with `--game-ini <file>` (the game's own settings file; default:
 /// the one in Documents), `--no-running-check`. For test series also `--quality native` (the game's FSR off) and
 /// `--pixel-density <0.5..2>` (the game's resolution scale) and `--fps-limit <fps>|off|off,<fps>` (the game's
@@ -597,6 +613,7 @@ fn run_command_line(args: &[String]) -> i32 {
         gain: value("--gain").and_then(|v| v.parse().ok()).unwrap_or(4).min(16),
         lod_bias: !flag("--no-lod-bias"),
         game_sharpening: !flag("--no-game-sharpening"),
+        sharpness: value("--sharpness").and_then(|v| v.parse().ok()).unwrap_or(0).min(100),
         dev_mode: flag("--dev"),
     };
     let dlss_file = value("--dlss-file").map(PathBuf::from);

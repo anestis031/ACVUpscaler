@@ -19,6 +19,29 @@ namespace acv
 		return matched;
 	}
 
+	// Sharpening, live. The game's pass only exists while its FSR 1 is on; the add-on's own pass runs
+	// wherever the game's does not follow the upscaler.
+	static void draw_sharpening(DeviceData &data)
+	{
+		ImGui::Separator();
+		const bool game_pass_exists = data.game_fsr1_seen.load(std::memory_order_relaxed);
+		bool game_sharpening = settings::game_sharpening();
+		ImGui::BeginDisabled(!game_pass_exists);
+		if (ImGui::Checkbox("Sharpening pass of the game on top (fixed strength)", &game_sharpening))
+			settings::set_game_sharpening(game_sharpening);
+		ImGui::EndDisabled();
+		const bool own_runs = !game_pass_exists || !game_sharpening;
+		int sharpness = static_cast<int>(settings::sharpness());
+		ImGui::BeginDisabled(!own_runs);
+		if (ImGui::SliderInt("Own sharpening", &sharpness, 0, 100, "%d %%", ImGuiSliderFlags_AlwaysClamp))
+			settings::set_sharpness(static_cast<uint32_t>(sharpness), false);
+		if (ImGui::IsItemDeactivatedAfterEdit())
+			settings::set_sharpness(static_cast<uint32_t>(sharpness), true);
+		ImGui::EndDisabled();
+		ImGui::TextWrapped(own_runs ? "0 is no sharpening, 84 is as strong as the game's pass. Ctrl+click the slider to type a value." :
+			"Untick the game's pass to set the strength yourself.");
+	}
+
 	// What a player needs: is it working, on or off, and what to do when something is off
 	static void draw_user_panel(DeviceData &data)
 	{
@@ -38,6 +61,8 @@ namespace acv
 
 		ImGui::Text("Status: %s", replace::state(data));
 		ImGui::TextWrapped("Upscaler calls: %s", data.fsr->status().c_str());
+		if (const uint64_t declined = data.declined_lists.load(std::memory_order_relaxed))
+			ImGui::Text("Frames left to the game (camera cuts): %llu", declined);
 		const float frame_ms = data.average_frame_ms.load(std::memory_order_relaxed);
 		if (frame_ms > 0.0f)
 			ImGui::Text("%.0f fps (%.2f ms)", 1000.0 / static_cast<double>(frame_ms), static_cast<double>(frame_ms));
@@ -53,8 +78,10 @@ namespace acv
 				ImGui::TextWrapped("The render resolution changed: restart the game once so that textures get the right sharpness (%+.2f).", static_cast<double>(wanted));
 		}
 
+		draw_sharpening(data);
+
 		ImGui::Separator();
-		ImGui::TextWrapped("Settings: ACVUpscalerSetup.exe (with the game closed). Log: %sacvupscaler.log", log::directory_utf8().c_str());
+		ImGui::TextWrapped("Other settings: ACVUpscalerSetup.exe (with the game closed). Log: %sacvupscaler.log", log::directory_utf8().c_str());
 	}
 
 	// First texture bound with the given descriptor type, in root parameter order
@@ -187,6 +214,8 @@ namespace acv
 			ImGui::Text("replacement: %s", replace::state(*data));
 			ImGui::TextWrapped("FSR: %s", data->fsr->status().c_str());
 			ImGui::TextWrapped("Texture LOD bias this session: %+.2f (follows the render scale of the previous session: restart the game after changing its FSR quality)", static_cast<double>(replace::session_mip_bias()));
+			draw_sharpening(*data);
+			ImGui::Separator();
 
 			const auto toggle = [data](const char *label, std::atomic<bool> &value) {
 				bool checked = value.load(std::memory_order_relaxed);

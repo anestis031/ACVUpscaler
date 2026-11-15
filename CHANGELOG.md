@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0-beta.2
+
+- Camera cuts in cutscenes: the frame of the cut is left to the game, and the upscaler starts without history
+  after it.
+- Own sharpening pass with a strength from 0 to 100, as an alternative to the game's fixed one. Both can be
+  changed while playing, in the add-on's panel.
+
 ## 1.0.0-beta.1
 
 First public version.

@@ -15,7 +15,7 @@
 #include <exception>
 #include <string>
 
-#define ACV_VERSION "1.0.0-beta.1"
+#define ACV_VERSION "1.0.0-beta.2"
 
 namespace acv
 {
@@ -36,7 +36,7 @@ namespace acv
 	}
 
 	// ACVUpscaler.ini next to the add-on DLL, read once at start. The setup application writes the file; the
-	// add-on itself only updates Mode and RenderScale (replace.cpp).
+	// add-on itself only updates Mode and RenderScale (replace.cpp) and the two sharpening settings (the panel).
 	namespace settings
 	{
 		struct Values
@@ -48,11 +48,19 @@ namespace acv
 			float reactive_gain = 4.0f;
 			bool lod_bias = true;       // Negative texture LOD bias from the render scale of the last session
 			bool keep_contexts = false; // Never call ffxDestroyContext (OptiScaler without its swap chain hooks)
-			// The game's RCAS sharpening on top of the upscaler. Off: the upscaler writes what RCAS would have
-			// written and both FSR 1 passes are skipped (softer picture, one pass less).
-			bool game_sharpening = true;
 		};
 		const Values &get();
+
+		// The sharpening settings can be changed from the panel while the game runs. Any thread may read them.
+		// The game's RCAS sharpening on top of the upscaler. Off: the upscaler writes what RCAS would have
+		// written and both FSR 1 passes are skipped (softer picture, one pass less).
+		bool game_sharpening();
+		// Strength in percent of the add-on's own sharpening pass (RCAS), which runs wherever the game's does not
+		// follow the upscaler: with GameSharpening=0 and at native resolution. 84 is the strength of the game's pass.
+		uint32_t sharpness();
+		// Take effect in the next frame. 'save' also writes the value to the file (not while a slider is dragged).
+		void set_game_sharpening(bool on);
+		void set_sharpness(uint32_t percent, bool save);
 		// False in the test harness (ACV_TEST_NO_SETTINGS): the defaults apply there, with the developer tools on
 		bool file_enabled();
 		std::wstring path();

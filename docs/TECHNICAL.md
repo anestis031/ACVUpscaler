@@ -50,11 +50,20 @@ axis made a still image measurably softer.
 
 ## What the add-on does with it (`src/replace.cpp`, `src/fsr.cpp`)
 
-- Game FSR 1 on: the three TAA draws are skipped and t0 is copied into RT0. At the EASU dispatch a small
+- Game FSR 1 on: the three TAA draws are skipped and t0 is copied into RT0 and RT1 (the TAA history, so that
+  the game's own TAA finds a sane one in the frames left to it). At the EASU dispatch a small
   compute pass decodes velocity, distance and mask, then `ffxDispatch` upscales t0 to the display size straight
   into EASU's output texture. EASU is skipped, the game's RCAS still runs. With `GameSharpening=0` the same
   happens at the RCAS dispatch, into RCAS's output texture, and both EASU and RCAS are skipped.
 - Game FSR 1 off: the upscaler runs at the TAA draws in native anti-aliasing mode and writes RT0 and RT1.
+- Camera cuts: at a cut inside a cutscene the game binds a 4x4 texture of zeros as t1 for one frame, and leaves
+  the history flag of its TAA constants (row 0) at 1. Such a frame is left to the game: its TAA, EASU and RCAS
+  run untouched. The frame gap then makes the upscaler drop its history in the next frame. Row 0 = 0 would
+  reset the upscaler as well, but the game has not been seen to use it.
+- Own sharpening: where the game's RCAS does not follow the upscaler (`GameSharpening=0`, and at native
+  resolution) the upscaler writes an intermediate texture and a compute pass (RCAS of FSR 1 without its noise
+  detection, strength `Sharpness` / 100) writes the result. 84 is the strength of the game's own pass. Both
+  settings can be changed from the add-on's panel while the game runs.
 - Colour is tonemapped 8-bit, so the context has the non-linear colour space flag and the dispatch the sRGB
   flag, with pre-exposure 1 and no auto exposure. Depth is inverted.
 - The reactive mask is `min(t3 * gain, 0.9)`.

@@ -189,6 +189,7 @@ namespace acv
 		std::atomic<float> fsr_reactive_gain { 0.0f }; // Reactive mask = t3 * gain, zero = none. From the settings.
 		std::atomic<bool> game_fsr1_seen { false }; // EASU and RCAS were recorded in the last finished frame
 		std::atomic<bool> rcas_replace_failed { false }; // GameSharpening=0 did not work once: FSR runs at EASU again
+		std::atomic<uint64_t> declined_lists { 0 }; // Command lists whose TAA draws were left to the game (camera cuts: one per frame)
 		std::atomic<float> saved_render_scale { 0.0f }; // Last render scale written to the settings file
 
 		// Frame time, averaged over the last frames (written by the presenting thread)

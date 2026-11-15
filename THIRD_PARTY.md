@@ -24,6 +24,10 @@ allow it to be redistributed on its own. When you choose DLSS, the setup tool do
 directly from NVIDIA's repository (https://github.com/NVIDIA/DLSS), checks its SHA-256 and places it in the
 game folder. By using it you accept NVIDIA's licence: https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt
 
+## Sharpening pass
+The add-on's own sharpening pass (`src/fsr.cpp`) follows RCAS from AMD FidelityFX Super Resolution 1
+(`ffx_fsr1.h`), MIT licence, Copyright (c) 2021 Advanced Micro Devices, Inc.
+
 ## Headers used at build time
 The add-on is built against the ReShade add-on API headers (BSD 3-Clause, some files MIT), Dear ImGui headers
 (MIT) through ReShade, and the FidelityFX API headers (the MIT part of AMD's SDK licence). The setup tool uses the `windows-sys` crate
