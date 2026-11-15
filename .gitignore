@@ -1,0 +1,7 @@
+build/
+external/
+dist/
+captures/
+*.log
+.vs/
+.vscode/
