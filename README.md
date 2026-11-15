@@ -1,116 +1,79 @@
 # ACVUpscaler
 
-A temporal upscaler for **Assassin's Creed Valhalla** (PC, DirectX 12). It replaces the game's own
-anti-aliasing and its FSR 1 upscale with **FSR 3.1**, or with **DLSS** on NVIDIA RTX cards.
+Replaces the anti-aliasing and the FSR 1 upscale of **Assassin's Creed Valhalla** (PC, DirectX 12) with
+**FSR 3.1**, or with **DLSS** on NVIDIA RTX cards.
 
-Valhalla only ships FSR 1, a spatial upscaler: it never sees more than the current frame, which is why the
-game looks soft and unstable below native resolution. The game does produce everything a temporal upscaler
-needs (motion vectors, depth, a jittered camera) for its own TAA. ACVUpscaler takes those and hands them to a
-modern upscaler instead.
+> **Beta.** Tested on one PC: Steam version of the game as of November 2026, RTX 3060, 2560x1440, Windows 11.
+> Single-player only, at your own risk.
 
-*Ελληνικά: [README.el.md](README.el.md)*
-
-> **Beta.** Tested on one PC: the Steam version of the game as of November 2026, an RTX 3060, 2560x1440,
-> Windows 11. Other game versions, resolutions and cards are untested. Single-player only, at your own risk.
-
-## What you get
-
-### Speed
-
-The game's own benchmark on one PC (RTX 3060, i7-11700K, 2560x1440), one run per setting; runs of the same
-setting differ by about 1 fps. Average fps / lowest 1 %:
-
-| | Native 2560x1440 | Ultra Quality 1976x1112 | Quality 1712x960 | Balanced 1512x848 | Performance 1280x720 |
-|---|---|---|---|---|---|
-| Game alone (TAA, FSR 1) | 64 / 47 | 83 / 62 | 93 / 69 | 100 / 70 | 111 / 76 |
-| FSR 3.1 | 56 / 44 | 73 / 55 | 81 / 60 | 90 / 65 | 98 / 66 |
-| DLSS 310.9.16, model K | 57 / 42 | 70 / 54 | 78 / 57 | 83 / 61 | 90 / 63 |
-| DLSS 310.9.16, model M | not measured | 47 / 38 | 55 / 44 | 61 / 48 | 72 / 53 |
-
-- At the same render resolution a frame takes about 1.7 ms longer with FSR 3.1 and 2.2 ms longer with DLSS K
-  than with the game's FSR 1 (Ultra Quality). DLSS K at Balanced runs as fast as FSR 1 at Ultra Quality.
-- Model M is heavy on this card: about 9 ms per frame more than FSR 1 at Ultra Quality. Model K is the one to
-  use on RTX 20 and 30 series cards.
-- Native: with FidelityFX Super Resolution off in the game, the upscaler replaces only the anti-aliasing.
-
-### Picture
-
-Every setting was recorded in the benchmark and compared frame by frame with a recording at 200 % resolution
-scale (method and all numbers: [docs/TECHNICAL.md](docs/TECHNICAL.md)). What the scores say, and what they
-cannot say:
-
-- Within every upscaler the picture gets worse with each step down in render resolution, as expected.
-- At native resolution FSR 3.1, DLSS K and the game's TAA score the same.
-- At Ultra Quality single frames of FSR 1, FSR 3.1 and DLSS K score the same. Below that FSR 1 falls off
-  faster: at Quality it scores like FSR 3.1 and DLSS K at Performance, and at Performance far below them.
-- With DLSS, the picture is closer to the reference with the game's sharpening pass switched off (an option of
-  the setup tool); with it the picture is sharper than the reference.
-- **Not measured: stability in motion** (shimmer, crawling edges, ghosting). The scores look at single frames,
-  and stability is where a temporal upscaler differs most from FSR 1. Judge that with your own eyes.
-
-**Comparison video** (4K, 60 fps; watch it at 2160p): all settings side by side in the benchmark, in groups of
-similar frame rate: https://www.youtube.com/watch?v=j24VcwrQKlU
-
-## Requirements
-
-- Assassin's Creed Valhalla on PC (the Steam version was tested; the setup tool also looks for a Ubisoft
-  Connect installation, which is untested)
-- Windows 10 or 11, 64-bit
-- For FSR 3.1: any DirectX 12 graphics card
-- For DLSS: an NVIDIA RTX card with a current driver
+Comparison video (4K, watch at 2160p): https://www.youtube.com/watch?v=j24VcwrQKlU
 
 ## Install
 
-1. Download `ACVUpscaler-<version>.zip` from the Releases page and extract all of it.
-2. Close the game. Run `ACVUpscalerSetup.exe`.
-3. Choose the upscaler and press **Install / Apply**. The tool lists every file it is going to add before it
-   does anything.
-4. Start the game. In the graphics options turn **FidelityFX Super Resolution** on and pick a quality: that
-   setting now decides the render resolution, the upscaling itself is done by FSR 3.1 or DLSS.
+1. Download `ACVUpscaler-<version>.zip` from the Releases page and extract it outside the game folder.
+2. Close the game and run `ACVUpscalerSetup.exe`.
+3. Choose the upscaler and the render quality, press **Install / Apply**. The tool lists every file before it
+   adds it.
+4. Start the game. To check: **Home** key, **Add-ons** tab, `Status: active`.
 
-Details, the manual way and troubleshooting: [INSTALL.md](INSTALL.md). Removing it: [UNINSTALL.md](UNINSTALL.md).
+To remove it, run the tool again and press **Uninstall**. Details: [INSTALL.md](INSTALL.md),
+[UNINSTALL.md](UNINSTALL.md).
 
-## How it works
+## Method: how FSR 3.1 and DLSS got into the game
 
-- A [ReShade](https://reshade.me) add-on recognises the game's TAA and FSR 1 passes by the checksums of their
-  shaders, skips them, and calls AMD's FidelityFX API (FSR 3.1) with the game's colour, motion vectors,
-  depth and jitter. The result is written where the game expects its own upscaled image.
-- For DLSS, [OptiScaler](https://github.com/optiscaler/OptiScaler) sits in the same process, intercepts those
-  FSR 3.1 calls and runs DLSS instead.
-- Nothing in the game's files or its executable is modified. Everything is loaded through the usual `dxgi.dll`
-  (and for DLSS `winmm.dll`) files next to the game, and removed again by deleting them.
+1. **The idea.** Valhalla ships only FSR 1, which sees one frame at a time. For its own TAA the game already
+   produces what a temporal upscaler needs: motion vectors, depth and a jittered camera. The task was to find
+   them and hand them to a modern upscaler.
+2. **Finding the inputs.** Frame captures showed the TAA pass, the two FSR 1 passes, and the textures and
+   constants they read.
+3. **Decoding them.** The motion vectors are packed into an 8-bit texture, the "depth" is distance from the
+   camera, the jitter sits in the TAA's constants. Each one was decoded and then verified with dumps made from
+   inside the running game, never assumed.
+4. **Proof at native resolution.** FSR 3.1 first replaced only the game's TAA, with no upscaling. A stable,
+   sharp picture there proved the inputs right.
+5. **Upscaling.** With FSR 1 on, the game renders at a lower resolution and upscales at the end of the frame.
+   The add-on recognises those passes by the checksums of their shaders, skips them and runs FSR 3.1 in their
+   place, writing into the texture the game expects.
+6. **DLSS.** The add-on only speaks AMD's FSR 3.1 API. [OptiScaler](https://github.com/optiscaler/OptiScaler)
+   intercepts those calls and runs DLSS with the same inputs, so one integration gives both.
+7. **Measuring.** Every setting ran through the game's benchmark for speed, was recorded, and was compared
+   frame by frame with a recording at 200 % resolution scale.
 
-## Known limits
+No game file and no executable is modified: everything loads through [ReShade](https://reshade.me) as an
+add-on. The details are in [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
-- **One game version.** If an update changes the shaders, the add-on notices that it does not recognise
-  them, does nothing, and says so in its panel (ReShade overlay, Home key, Add-ons tab).
-- **Steam overlay or OptiScaler menu, not both** (DLSS only). The setup tool lets you choose.
-- **Texture sharpness follows one start behind.** The game creates its texture samplers once at start, so
-  after changing the FSR quality in the game, restart it once.
-- **Effects after the upscale point** (bloom, depth of field, motion blur) still run at the render resolution.
-- **Rain and other particles** have no motion vectors. FSR 3.1 gets a mask for them from the game; with DLSS,
-  OptiScaler does not pass that mask on by default.
-- With the Steam overlay layout the add-on keeps old DLSS instances alive instead of destroying them (a
-  workaround for a crash); this costs some video memory after each change of resolution.
-- Frame generation is not included.
+## Results
 
-## Safety
+The game's benchmark, RTX 3060, i7-11700K, 2560x1440. Average fps / lowest 1 %:
 
-- **Single-player only.** ReShade's add-on build and OptiScaler are not meant for online games.
-- The game runs through Ubisoft Connect. This project changes no game file and no executable, but it does
-  load third-party DLLs into the game process. Whether that is acceptable for your account is your decision.
-- The DLSS file is not distributed here. The setup tool downloads it from NVIDIA's own repository and checks
-  its checksum; by using it you accept NVIDIA's licence.
+| | Native | Ultra Quality | Quality | Balanced | Performance |
+|---|---|---|---|---|---|
+| Game alone (TAA, FSR 1) | 64 / 47 | 83 / 62 | 93 / 69 | 100 / 70 | 111 / 76 |
+| FSR 3.1 | 56 / 44 | 73 / 55 | 81 / 60 | 90 / 65 | 98 / 66 |
+| DLSS, model K | 57 / 42 | 70 / 54 | 78 / 57 | 83 / 61 | 90 / 63 |
+| DLSS, model M | not measured | 47 / 38 | 55 / 44 | 61 / 48 | 72 / 53 |
 
-## Building from source
+- FSR 3.1 costs about 1.7 ms per frame more than FSR 1, DLSS K about 2.2 ms. Model M is heavy on this card:
+  use K on RTX 20 and 30 series.
+- Single frames at Ultra Quality score the same for FSR 1, FSR 3.1 and DLSS K. Below that FSR 1 loses detail
+  faster.
+- **Stability in motion was not measured**, and that is where temporal upscalers differ most from FSR 1. The
+  video is there to judge it.
 
-See [BUILDING.md](BUILDING.md).
+## Limits
 
-## Licence and credits
+- One game version. After a game update that changes the shaders the add-on does nothing and says so.
+- With DLSS: Steam overlay or OptiScaler menu, not both.
+- Bloom, depth of field and motion blur still run at the render resolution.
+- No frame generation.
 
-ACVUpscaler is under the MIT licence ([LICENSE](LICENSE)). It would not exist without ReShade (crosire),
-OptiScaler, AMD's FidelityFX SDK and NVIDIA's DLSS; what is redistributed and under which terms is listed in
-[THIRD_PARTY.md](THIRD_PARTY.md).
+## Safety and licence
+
+- Single-player only. The mod loads third-party DLLs (ReShade, OptiScaler) into a game that runs through
+  Ubisoft Connect; whether that is acceptable for your account is your decision.
+- The DLSS file is not distributed here: the setup tool downloads it from NVIDIA's repository.
+- MIT licence ([LICENSE](LICENSE)); third-party parts are listed in [THIRD_PARTY.md](THIRD_PARTY.md). Building
+  from source: [BUILDING.md](BUILDING.md).
 
 Assassin's Creed Valhalla is a trademark of Ubisoft. This project is not affiliated with or endorsed by
-Ubisoft, AMD, NVIDIA or any of the projects above.
+Ubisoft, AMD, NVIDIA or the projects named above.
