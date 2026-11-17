@@ -7,6 +7,7 @@ namespace acv
 		// Set when the file is read ('settings::get'), then by the panel
 		std::atomic<bool> s_game_sharpening { true };
 		std::atomic<uint32_t> s_sharpness { 0 };
+		std::atomic<bool> s_reflex { false };
 	}
 
 	bool settings::file_enabled()
@@ -48,6 +49,24 @@ namespace acv
 						values.reactive_gain = gain;
 				}
 			}
+			if (file_enabled())
+			{
+				const std::wstring file = path();
+				wchar_t text[32] = {};
+				GetPrivateProfileStringW(L"ACVUpscaler", L"Upscaler", L"FSR31", text, 32, file.c_str());
+				values.dlss = _wcsicmp(text, L"DLSS") == 0;
+				GetPrivateProfileStringW(L"ACVUpscaler", L"DlssPreset", L"K", text, 32, file.c_str());
+				values.dlss_preset = _wcsicmp(text, L"M") == 0 ? 13 : _wcsicmp(text, L"Default") == 0 ? 0 : 11;
+				s_reflex.store(GetPrivateProfileIntW(L"ACVUpscaler", L"Reflex", 0, file.c_str()) != 0, std::memory_order_relaxed);
+			}
+			if (GetEnvironmentVariableW(L"ACV_TEST_REFLEX", nullptr, 0) != 0) // Test harness only
+				s_reflex.store(true, std::memory_order_relaxed);
+			wchar_t test_upscaler[8] = {};
+			if (GetEnvironmentVariableW(L"ACV_TEST_UPSCALER", test_upscaler, 8) != 0) // Test harness only: DLSS or DLSS-M
+			{
+				values.dlss = _wcsnicmp(test_upscaler, L"DLSS", 4) == 0;
+				values.dlss_preset = _wcsicmp(test_upscaler, L"DLSS-M") == 0 ? 13 : 11;
+			}
 			values.dev_mode = values.dev_mode || test_dev_mode || !file_enabled();
 			if (GetEnvironmentVariableW(L"ACV_TEST_NO_SHARPENING", nullptr, 0) != 0) // Test harness only
 				game_sharpening = false;
@@ -57,9 +76,11 @@ namespace acv
 			s_game_sharpening.store(game_sharpening, std::memory_order_relaxed);
 			s_sharpness.store(own_sharpness, std::memory_order_relaxed);
 
-			log::write("settings: developer tools %s, reactive gain %.1f, texture LOD bias %s, contexts %s, sharpening of the game %s, own sharpening %u %%", values.dev_mode ? "on" : "off",
+			log::write("settings: developer tools %s, reactive gain %.1f, texture LOD bias %s, contexts %s, sharpening of the game %s, own sharpening %u %%, upscaler %s, Reflex %s", values.dev_mode ? "on" : "off",
 				static_cast<double>(values.reactive_gain), values.lod_bias ? "on" : "off", values.keep_contexts ? "kept (KeepContexts=1)" : "destroyed when replaced",
-				game_sharpening ? "on" : "off (GameSharpening=0)", own_sharpness);
+				game_sharpening ? "on" : "off (GameSharpening=0)", own_sharpness,
+				!values.dlss ? "FSR 3.1" : values.dlss_preset == 13 ? "DLSS, preset M" : values.dlss_preset == 11 ? "DLSS, preset K" : "DLSS, default preset",
+				s_reflex.load(std::memory_order_relaxed) ? "on" : "off");
 			return values;
 		}();
 		return s_values;
@@ -74,6 +95,21 @@ namespace acv
 	{
 		get();
 		return s_sharpness.load(std::memory_order_relaxed);
+	}
+
+	bool settings::reflex()
+	{
+		get();
+		return s_reflex.load(std::memory_order_relaxed);
+	}
+	void settings::set_reflex(bool on)
+	{
+		get();
+		if (s_reflex.exchange(on, std::memory_order_relaxed) == on)
+			return;
+		log::write("panel: Reflex %s", on ? "on" : "off");
+		if (file_enabled())
+			WritePrivateProfileStringW(L"ACVUpscaler", L"Reflex", on ? L"1" : L"0", path().c_str());
 	}
 
 	void settings::set_game_sharpening(bool on)

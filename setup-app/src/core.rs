@@ -22,6 +22,8 @@ const RESHADE_INI: &str = "ReShade.ini";
 const ADDON_PATH: &str = ".\\ACVUpscaler";
 
 pub const DLSS_FILE: &str = "nvngx_dlss.dll";
+/// Where the add-on looks for the DLSS file when it calls DLSS itself
+const DLSS_IN_SUBDIR: &str = "ACVUpscaler\\nvngx_dlss.dll";
 pub const DLSS_VERSION: &str = "310.9.16";
 pub const DLSS_URL: &str =
     "https://raw.githubusercontent.com/NVIDIA/DLSS/9981c6350dc58c0ce21f024fd65e31e851c31689/lib/Windows_x86_64/rel/nvngx_dlss.dll";
@@ -33,14 +35,23 @@ const P_ADDON: &str = "ACVUpscaler.addon64";
 const P_FFX_LOADER: &str = "amd_fidelityfx_loader_dx12.dll";
 const P_FFX_UPSCALER: &str = "amd_fidelityfx_upscaler_dx12.dll";
 const P_RESHADE: &str = "ReShade64.dll";
-const P_OPTISCALER: &str = "OptiScaler.dll";
-const P_OPTISCALER_INI: &str = "OptiScaler.ini";
-pub const PAYLOAD_FILES: [&str; 6] = [P_ADDON, P_FFX_LOADER, P_FFX_UPSCALER, P_RESHADE, P_OPTISCALER, P_OPTISCALER_INI];
+pub const PAYLOAD_FILES: [&str; 4] = [P_ADDON, P_FFX_LOADER, P_FFX_UPSCALER, P_RESHADE];
+/// OptiScaler 0.9.4 as the releases up to 1.0.0-beta.2 placed it for DLSS: no longer shipped, still recognised
+/// as a file of this tool so that such an installation can be taken over
+const OPTISCALER_SHA256: &str = "fbfb6676b829dad7e020fb830586a16aa0ec6add78016db48ef12e2ae1803231";
 
 /// Names in the game folder that can hold one of our DLLs, whatever the layout
 const DLL_SLOTS: [&str; 4] = ["dxgi.dll", "winmm.dll", "ReShade64.dll", DLSS_FILE];
-/// Written by ReShade, OptiScaler and the add-on while the game runs
-const RUNTIME_FILES: [&str; 4] = ["ReShade.log", "OptiScaler.log", "ACVUpscaler\\acvupscaler.log", "ACVUpscaler\\acvupscaler_perf.log"];
+/// Written by ReShade, OptiScaler, the add-on and (with the developer tools on) DLSS while the game runs
+const RUNTIME_FILES: [&str; 7] = [
+    "ReShade.log",
+    "OptiScaler.log",
+    "ACVUpscaler\\acvupscaler.log",
+    "ACVUpscaler\\acvupscaler_perf.log",
+    "ACVUpscaler\\nvngx.log",
+    "ACVUpscaler\\nvsdk_ngx.log",
+    "ACVUpscaler\\nvngx_dlss_310_9_16.log",
+];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Upscaler {
@@ -57,18 +68,9 @@ pub enum Model {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Overlay {
-    /// OptiScaler as winmm.dll behind ReShade: the Steam overlay works, OptiScaler's own menu does not
-    Steam,
-    /// OptiScaler as dxgi.dll in front of ReShade: its menu opens with Insert, the Steam overlay does not show
-    OptiMenu,
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Choice {
     pub upscaler: Upscaler,
     pub model: Model,
-    pub overlay: Overlay,
     pub gain: u32,
     pub lod_bias: bool,
     /// The sharpening pass (RCAS) of the game on top of the upscaler
@@ -77,11 +79,14 @@ pub struct Choice {
     /// `game_sharpening` off and at native resolution. 0: none, 84: the strength of the game's pass.
     pub sharpness: u32,
     pub dev_mode: bool,
+    /// NVIDIA Reflex low latency mode of the add-on (its limited form). Also a checkbox in the add-on's panel in
+    /// the game, which writes the same setting.
+    pub reflex: bool,
 }
 
 impl Default for Choice {
     fn default() -> Self {
-        Choice { upscaler: Upscaler::Fsr31, model: Model::K, overlay: Overlay::Steam, gain: 4, lod_bias: true, game_sharpening: true, sharpness: 0, dev_mode: false }
+        Choice { upscaler: Upscaler::Fsr31, model: Model::K, gain: 4, lod_bias: true, game_sharpening: true, sharpness: 0, dev_mode: false, reflex: false }
     }
 }
 
@@ -98,18 +103,9 @@ fn wanted_files(choice: &Choice) -> Vec<(&'static str, Source)> {
         ("ACVUpscaler\\amd_fidelityfx_loader_dx12.dll", Source::Payload(P_FFX_LOADER)),
         ("ACVUpscaler\\amd_fidelityfx_upscaler_dx12.dll", Source::Payload(P_FFX_UPSCALER)),
     ];
-    match (choice.upscaler, choice.overlay) {
-        (Upscaler::Dlss, Overlay::Steam) => {
-            files.push(("dxgi.dll", Source::Payload(P_RESHADE)));
-            files.push(("winmm.dll", Source::Payload(P_OPTISCALER)));
-            files.push((DLSS_FILE, Source::Dlss));
-        }
-        (Upscaler::Dlss, Overlay::OptiMenu) => {
-            files.push(("dxgi.dll", Source::Payload(P_OPTISCALER)));
-            files.push(("ReShade64.dll", Source::Payload(P_RESHADE)));
-            files.push((DLSS_FILE, Source::Dlss));
-        }
-        _ => files.push(("dxgi.dll", Source::Payload(P_RESHADE))),
+    files.push(("dxgi.dll", Source::Payload(P_RESHADE)));
+    if choice.upscaler == Upscaler::Dlss {
+        files.push((DLSS_IN_SUBDIR, Source::Dlss));
     }
     files
 }
@@ -204,9 +200,9 @@ fn hash_if_exists(path: &Path) -> Result<Option<String>, String> {
 }
 
 /// Hashes of everything this tool ships or downloads: a file equal to one of them is ours to replace
-fn shipped_hashes(payload: &Path) -> Result<Vec<String>, String> {
-    let mut hashes = vec![DLSS_SHA256.to_string()];
-    for name in [P_ADDON, P_FFX_LOADER, P_FFX_UPSCALER, P_RESHADE, P_OPTISCALER] {
+fn shipped_hashes(payload: &Path, dlss_hash: &str) -> Result<Vec<String>, String> {
+    let mut hashes = vec![dlss_hash.to_string(), OPTISCALER_SHA256.to_string()];
+    for name in [P_ADDON, P_FFX_LOADER, P_FFX_UPSCALER, P_RESHADE] {
         hashes.push(sys::sha256_file(&payload.join(name))?);
     }
     Ok(hashes)
@@ -230,19 +226,36 @@ pub fn check_folders(game: &Path, payload: &Path) -> Result<(), String> {
 
 /// What has to happen to the files of the game folder for this choice. Fails on the first conflict.
 pub fn plan_install(game: &Path, payload: &Path, choice: &Choice, dlss_local: Option<&Path>) -> Result<Vec<Action>, String> {
+    plan_install_for(game, payload, choice, dlss_local, DLSS_SHA256)
+}
+
+/// `dlss_hash`: the checksum the DLSS file has to have (the tests use a stand-in file)
+fn plan_install_for(game: &Path, payload: &Path, choice: &Choice, dlss_local: Option<&Path>, dlss_hash: &str) -> Result<Vec<Action>, String> {
     check_folders(game, payload)?;
     let manifest = Manifest::load(game);
-    let shipped = shipped_hashes(payload)?;
+    let shipped = shipped_hashes(payload, dlss_hash)?;
     let wanted = wanted_files(choice);
     let mut actions = Vec::new();
 
     for (target, source) in &wanted {
         let (source_path, source_hash) = match source {
             Source::Payload(name) => (Some(payload.join(name)), sys::sha256_file(&payload.join(name))?),
-            Source::Dlss => (dlss_local.map(Path::to_path_buf), DLSS_SHA256.to_string()),
+            Source::Dlss => {
+                // The copy given on the command line, or the one an earlier layout left in its other place:
+                // nothing is downloaded twice
+                let mut local = dlss_local.map(Path::to_path_buf);
+                if local.is_none() {
+                    for other in [DLSS_FILE, DLSS_IN_SUBDIR] {
+                        if other != *target && hash_if_exists(&game.join(other))?.as_deref() == Some(dlss_hash) {
+                            local = Some(game.join(other));
+                        }
+                    }
+                }
+                (local, dlss_hash.to_string())
+            }
         };
         if let (Source::Dlss, Some(local)) = (source, dlss_local) {
-            if sys::sha256_file(local)? != DLSS_SHA256 {
+            if sys::sha256_file(local)? != dlss_hash {
                 return Err(format!("{} is not DLSS {} (the checksum differs)", local.display(), DLSS_VERSION));
             }
         }
@@ -270,14 +283,13 @@ pub fn plan_install(game: &Path, payload: &Path, choice: &Choice, dlss_local: Op
         }
     }
 
-    // Our own files that this choice no longer needs (another layout before, or OptiScaler no longer used)
+    // Our own files that this choice no longer needs (DLSS before and not now, or an older layout with OptiScaler)
     let mut candidates: Vec<String> = manifest.files.keys().cloned().collect();
     candidates.extend(DLL_SLOTS.iter().map(|s| s.to_string()));
     candidates.sort();
     candidates.dedup();
-    let uses_optiscaler = choice.upscaler == Upscaler::Dlss;
     for target in candidates {
-        let generated = target == ADDON_INI || target == RESHADE_INI || (target == OPTI_INI && uses_optiscaler);
+        let generated = target == ADDON_INI || target == RESHADE_INI;
         if generated || wanted.iter().any(|(wanted_target, _)| *wanted_target == target) {
             continue;
         }
@@ -305,19 +317,31 @@ fn bool_text(value: bool) -> &'static str {
     }
 }
 
-fn write_settings(game: &Path, payload: &Path, choice: &Choice, manifest: &mut Manifest, log: &mut Vec<String>) -> Result<(), String> {
+fn write_settings(game: &Path, choice: &Choice, manifest: &mut Manifest, log: &mut Vec<String>) -> Result<(), String> {
     // The add-on's own settings. RenderScale in the same file belongs to the add-on and is left alone.
     let addon_ini = game.join(ADDON_INI);
     ensure_parent(&addon_ini)?;
-    let keep_contexts = choice.upscaler == Upscaler::Dlss && choice.overlay == Overlay::Steam;
     let section = "ACVUpscaler";
     sys::ini_set(&addon_ini, section, "Mode", Some(if choice.upscaler == Upscaler::Off { "GameTAA" } else { "FSR31" }))?;
+    let own_dlss = choice.upscaler == Upscaler::Dlss;
+    sys::ini_set(&addon_ini, section, "Upscaler", Some(if own_dlss { "DLSS" } else { "FSR31" }))?;
+    sys::ini_set(
+        &addon_ini,
+        section,
+        "DlssPreset",
+        Some(match choice.model {
+            Model::K => "K",
+            Model::M => "M",
+            Model::Default => "Default",
+        }),
+    )?;
     sys::ini_set(&addon_ini, section, "ReactiveGain", Some(&choice.gain.to_string()))?;
     sys::ini_set(&addon_ini, section, "LodBias", Some(bool_text(choice.lod_bias)))?;
     sys::ini_set(&addon_ini, section, "GameSharpening", Some(bool_text(choice.game_sharpening)))?;
     sys::ini_set(&addon_ini, section, "Sharpness", Some(&choice.sharpness.to_string()))?;
-    sys::ini_set(&addon_ini, section, "KeepContexts", Some(bool_text(keep_contexts)))?;
+    sys::ini_set(&addon_ini, section, "KeepContexts", Some("0"))?; // Only for OptiScaler placed by hand (INSTALL.md)
     sys::ini_set(&addon_ini, section, "DevMode", Some(bool_text(choice.dev_mode)))?;
+    sys::ini_set(&addon_ini, section, "Reflex", Some(bool_text(choice.reflex)))?;
     manifest.files.insert(ADDON_INI.into(), "-".into());
     log.push(format!("settings {}", ADDON_INI));
 
@@ -337,52 +361,14 @@ fn write_settings(game: &Path, payload: &Path, choice: &Choice, manifest: &mut M
         log.push(format!("settings {} (AddonPath)", RESHADE_INI));
     }
 
-    if choice.upscaler == Upscaler::Dlss {
-        let opti_ini = game.join(OPTI_INI);
-        if !opti_ini.exists() {
-            fs::copy(payload.join(P_OPTISCALER_INI), &opti_ini).map_err(|e| format!("could not create {}: {}", OPTI_INI, e))?;
-        }
-        manifest.files.insert(OPTI_INI.into(), "-".into());
-        let preset = match choice.model {
-            Model::K => Some("11"),
-            Model::M => Some("13"),
-            Model::Default => None,
-        };
-        // Only the FidelityFX API calls of the add-on are intercepted; everything that would look into the
-        // game executable for built-in upscalers stays off, and so does the update check.
-        let values: [(&str, &str, &str); 15] = [
-            ("Upscalers", "Dx12Upscaler", "dlss"),
-            ("Inputs", "EnableFfxInputs", "true"),
-            ("Inputs", "EnableDlssInputs", "false"),
-            ("Inputs", "EnableXeSSInputs", "false"),
-            ("Inputs", "EnableFsr2Inputs", "false"),
-            ("Inputs", "EnableFsr3Inputs", "false"),
-            ("Inputs", "Fsr2Pattern", "false"),
-            ("Inputs", "Fsr3Pattern", "false"),
-            ("Plugins", "LoadReshade", if choice.overlay == Overlay::OptiMenu { "true" } else { "false" }),
-            ("ProcessFilter", "TargetProcessName", GAME_EXE),
-            ("Hotfix", "CheckForUpdate", "false"),
-            ("Log", "LogToFile", "true"),
-            ("Log", "LogLevel", "2"),
-            ("DLSS", "RenderPresetOverride", if preset.is_some() { "true" } else { "auto" }),
-            ("DLSS", "RenderPresetForAll", preset.unwrap_or("auto")),
-        ];
-        for (section, key, value) in values {
-            sys::ini_set(&opti_ini, section, key, Some(value))?;
-        }
-        // The DLSS file lies next to OptiScaler, where it is found without a path
-        sys::ini_set(&opti_ini, "Libraries", "NvngxDlssPath", Some("auto"))?;
-        log.push(format!("settings {}", OPTI_INI));
-    } else if manifest.files.contains_key(OPTI_INI) {
+    // An installation of a release up to 1.0.0-beta.2 with OptiScaler: its settings file and its log go
+    if manifest.files.contains_key(OPTI_INI) {
         let opti_ini = game.join(OPTI_INI);
         if opti_ini.exists() {
             fs::remove_file(&opti_ini).map_err(|e| format!("could not remove {}: {}", OPTI_INI, e))?;
             log.push(format!("remove   {}", OPTI_INI));
         }
         manifest.files.remove(OPTI_INI);
-    }
-    if choice.upscaler != Upscaler::Dlss {
-        // OptiScaler is gone with this choice, and so is the log it wrote
         let _ = fs::remove_file(game.join("OptiScaler.log"));
     }
     Ok(())
@@ -391,7 +377,6 @@ fn write_settings(game: &Path, payload: &Path, choice: &Choice, manifest: &mut M
 /// Carries out a plan and writes the settings. `download` fetches the DLSS file to the given path.
 pub fn apply_install(
     game: &Path,
-    payload: &Path,
     choice: &Choice,
     actions: &[Action],
     game_exe_to_check: Option<&str>,
@@ -441,7 +426,7 @@ pub fn apply_install(
         manifest.save(game)?;
     }
 
-    write_settings(game, payload, choice, &mut manifest, &mut log)?;
+    write_settings(game, choice, &mut manifest, &mut log)?;
     manifest.save(game)?;
     Ok(log)
 }
@@ -533,14 +518,21 @@ pub fn read_choice(game: &Path) -> Choice {
     }
     let get = |key: &str| sys::ini_get(&addon_ini, "ACVUpscaler", key);
     let optiscaler = game.join(OPTI_INI).is_file() && (game.join("winmm.dll").is_file() || game.join("ReShade64.dll").is_file());
+    let own_dlss = get("Upscaler").eq_ignore_ascii_case("DLSS");
     choice.upscaler = if get("Mode").eq_ignore_ascii_case("GameTAA") {
         Upscaler::Off
-    } else if optiscaler {
+    } else if optiscaler || own_dlss {
         Upscaler::Dlss
     } else {
         Upscaler::Fsr31
     };
-    choice.overlay = if game.join("ReShade64.dll").is_file() { Overlay::OptiMenu } else { Overlay::Steam };
+    if own_dlss {
+        choice.model = match get("DlssPreset").to_ascii_uppercase().as_str() {
+            "M" => Model::M,
+            "DEFAULT" => Model::Default,
+            _ => Model::K,
+        };
+    }
     if optiscaler {
         let opti_ini = game.join(OPTI_INI);
         choice.model = match (sys::ini_get(&opti_ini, "DLSS", "RenderPresetOverride").as_str(), sys::ini_get(&opti_ini, "DLSS", "RenderPresetForAll").as_str()) {
@@ -556,6 +548,7 @@ pub fn read_choice(game: &Path) -> Choice {
     choice.game_sharpening = get("GameSharpening") != "0";
     choice.sharpness = get("Sharpness").parse::<u32>().unwrap_or(0).min(100);
     choice.dev_mode = get("DevMode") == "1";
+    choice.reflex = get("Reflex") == "1";
     choice
 }
 
@@ -577,7 +570,6 @@ pub fn command_line(game: &Path, game_settings: Option<&GameSettings>) -> String
             Model::M => "m",
             Model::Default => "default",
         }]);
-        args.extend(["--overlay", if choice.overlay == Overlay::OptiMenu { "menu" } else { "steam" }]);
     }
     let gain = choice.gain.to_string();
     args.extend(["--gain", gain.as_str()]);
@@ -593,6 +585,9 @@ pub fn command_line(game: &Path, game_settings: Option<&GameSettings>) -> String
     }
     if choice.dev_mode {
         args.push("--dev");
+    }
+    if choice.reflex {
+        args.push("--reflex");
     }
     args.join(" ") + &game_render_args(game_settings)
 }
@@ -613,7 +608,8 @@ pub fn game_render_args(game_settings: Option<&GameSettings>) -> String {
         Some((false, fps)) => format!(" --fps-limit off,{}", fps),
         None => String::new(),
     };
-    format!("{} --pixel-density {}{}", quality, settings.pixel_density, limit)
+    let characters = if settings.character == Some(CHARACTER_FULL) { " --full-characters" } else { "" };
+    format!("{} --pixel-density {}{}{}", quality, settings.pixel_density, limit, characters)
 }
 
 /// `--fps-limit` of the command line: "60" (limit on at 60), "off" (limit off), "off,30" (off, value 30 kept)
@@ -651,7 +647,6 @@ mod tests {
             for name in PAYLOAD_FILES {
                 fs::write(payload.join(name), format!("content of {}", name)).unwrap();
             }
-            fs::write(payload.join(P_OPTISCALER_INI), "; shipped file\r\n[Upscalers]\r\n; which upscaler\r\nDx12Upscaler=auto\r\n[DLSS]\r\nRenderPresetOverride=auto\r\nRenderPresetForAll=auto\r\n").unwrap();
             Sandbox { root, game, payload }
         }
 
@@ -676,7 +671,7 @@ mod tests {
             // The fake "DLSS file" cannot have the real checksum, so the tests never ask for the download
             let actions = plan_install(&self.game, &self.payload, choice, None)?;
             assert!(!needs_download(&actions) || choice.upscaler == Upscaler::Dlss);
-            apply_install(&self.game, &self.payload, choice, &actions, None, &|_| Err("no download in tests".into()))
+            apply_install(&self.game, choice, &actions, None, &|_| Err("no download in tests".into()))
         }
     }
 
@@ -715,6 +710,23 @@ mod tests {
     }
 
     #[test]
+    fn reflex_is_a_choice_and_the_panel_of_the_addon_can_change_it() {
+        let sandbox = Sandbox::new("reflex");
+        sandbox.install(&fsr()).unwrap();
+        let addon_ini = sandbox.game.join(ADDON_INI);
+        assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "Reflex"), "0");
+        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler fsr31 --gain 4");
+        let with_reflex = Choice { reflex: true, ..fsr() };
+        sandbox.install(&with_reflex).unwrap();
+        assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "Reflex"), "1");
+        assert_eq!(read_choice(&sandbox.game), with_reflex);
+        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler fsr31 --gain 4 --reflex");
+        // The add-on's panel writes the same key while the game runs: the tool shows what it finds
+        sys::ini_set(&addon_ini, "ACVUpscaler", "Reflex", Some("0")).unwrap();
+        assert_eq!(read_choice(&sandbox.game), fsr());
+    }
+
+    #[test]
     fn a_foreign_dxgi_dll_stops_the_installation() {
         let sandbox = Sandbox::new("conflict");
         fs::write(sandbox.game.join("dxgi.dll"), b"somebody else's mod").unwrap();
@@ -742,50 +754,29 @@ mod tests {
     }
 
     #[test]
-    fn layouts_switch_without_leftovers() {
-        let sandbox = Sandbox::new("layouts");
+    fn dlss_is_installed_next_to_the_addon() {
+        let sandbox = Sandbox::new("dlss");
         let before = sandbox.listing();
-        // The DLSS file is "already there" with the right content in these two layouts: stand-in via the plan only
-        let steam = Choice { upscaler: Upscaler::Dlss, overlay: Overlay::Steam, model: Model::K, ..Choice::default() };
-        let plan = plan_install(&sandbox.game, &sandbox.payload, &steam, None).unwrap();
-        assert!(needs_download(&plan));
-        let targets: Vec<String> = plan.iter().map(Action::describe).collect();
-        assert!(targets.iter().any(|t| t.contains("winmm.dll")), "{:?}", targets);
+        // A stand-in for the DLSS file, and its checksum in place of the real one
+        let stand_in = sandbox.root.join("stand_in_dlss.dll");
+        fs::write(&stand_in, b"stand-in for nvngx_dlss.dll").unwrap();
+        let hash = sys::sha256_file(&stand_in).unwrap();
+        let dlss = Choice { upscaler: Upscaler::Dlss, model: Model::K, game_sharpening: false, sharpness: 30, ..Choice::default() };
+        assert!(needs_download(&plan_install(&sandbox.game, &sandbox.payload, &dlss, None).unwrap()));
 
-        // Run the file part without the download step
-        let without_download: Vec<Action> = plan.into_iter().filter(|a| !matches!(a, Action::Download { .. })).collect();
-        apply_install(&sandbox.game, &sandbox.payload, &steam, &without_download, None, &|_| unreachable!()).unwrap();
-        assert_eq!(fs::read(sandbox.game.join("winmm.dll")).unwrap(), b"content of OptiScaler.dll".to_vec());
-        assert_eq!(fs::read(sandbox.game.join("dxgi.dll")).unwrap(), b"content of ReShade64.dll".to_vec());
-        let opti_ini = sandbox.game.join(OPTI_INI);
-        assert_eq!(sys::ini_get(&opti_ini, "DLSS", "RenderPresetForAll"), "11");
-        assert_eq!(sys::ini_get(&opti_ini, "Plugins", "LoadReshade"), "false");
-        assert!(fs::read_to_string(&opti_ini).unwrap().contains("; which upscaler"), "comments of the shipped file survive");
-        assert_eq!(sys::ini_get(&sandbox.game.join(ADDON_INI), "ACVUpscaler", "KeepContexts"), "1");
-        assert_eq!(read_choice(&sandbox.game).model, Model::K);
-
-        // To the layout with OptiScaler's menu: the two DLLs change places, winmm.dll goes
-        let menu = Choice { overlay: Overlay::OptiMenu, model: Model::M, game_sharpening: false, sharpness: 30, ..steam };
-        let plan: Vec<Action> = plan_install(&sandbox.game, &sandbox.payload, &menu, None).unwrap().into_iter().filter(|a| !matches!(a, Action::Download { .. })).collect();
-        apply_install(&sandbox.game, &sandbox.payload, &menu, &plan, None, &|_| unreachable!()).unwrap();
-        assert_eq!(fs::read(sandbox.game.join("dxgi.dll")).unwrap(), b"content of OptiScaler.dll".to_vec());
-        assert_eq!(fs::read(sandbox.game.join("ReShade64.dll")).unwrap(), b"content of ReShade64.dll".to_vec());
-        assert!(!sandbox.game.join("winmm.dll").exists());
-        assert_eq!(sys::ini_get(&opti_ini, "Plugins", "LoadReshade"), "true");
-        assert_eq!(sys::ini_get(&sandbox.game.join(ADDON_INI), "ACVUpscaler", "KeepContexts"), "0");
-        assert_eq!(read_choice(&sandbox.game), Choice { ..menu });
-        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler dlss --model m --overlay menu --gain 4 --no-game-sharpening --sharpness 30");
-
-        // To FSR 3.1 only: OptiScaler and its settings go
-        sandbox.install(&fsr()).unwrap();
-        assert_eq!(fs::read(sandbox.game.join("dxgi.dll")).unwrap(), b"content of ReShade64.dll".to_vec());
-        assert!(!sandbox.game.join("ReShade64.dll").exists() && !opti_ini.exists());
-        assert_eq!(read_choice(&sandbox.game).upscaler, Upscaler::Fsr31);
+        let plan = plan_install_for(&sandbox.game, &sandbox.payload, &dlss, Some(&stand_in), &hash).unwrap();
+        apply_install(&sandbox.game, &dlss, &plan, None, &|_| unreachable!()).unwrap();
+        let listing = sandbox.listing();
+        assert_eq!(listing["dxgi.dll"], b"content of ReShade64.dll".to_vec());
+        assert_eq!(listing[DLSS_IN_SUBDIR], b"stand-in for nvngx_dlss.dll".to_vec());
+        assert!(!listing.contains_key(DLSS_FILE) && !listing.contains_key("winmm.dll") && !listing.contains_key(OPTI_INI));
+        assert_eq!(sys::ini_get(&sandbox.game.join(ADDON_INI), "ACVUpscaler", "Upscaler"), "DLSS");
+        assert_eq!(read_choice(&sandbox.game), dlss);
+        assert_eq!(command_line(&sandbox.game, None), "--install --upscaler dlss --model k --gain 4 --no-game-sharpening --sharpness 30");
 
         uninstall(&sandbox.game, None).unwrap();
         assert_eq!(sandbox.listing(), before);
     }
-
     #[test]
     fn a_file_changed_after_installation_is_not_deleted() {
         let sandbox = Sandbox::new("changed");
@@ -803,14 +794,85 @@ mod tests {
         let sandbox = Sandbox::new("download");
         let dlss = Choice { upscaler: Upscaler::Dlss, ..Choice::default() };
         let plan = plan_install(&sandbox.game, &sandbox.payload, &dlss, None).unwrap();
-        let error = apply_install(&sandbox.game, &sandbox.payload, &dlss, &plan, None, &|path| {
+        let error = apply_install(&sandbox.game, &dlss, &plan, None, &|path| {
             fs::write(path, b"not the DLSS file").map_err(|e| e.to_string())
         })
         .unwrap_err();
         assert!(error.contains("checksum"), "{}", error);
-        assert!(!sandbox.game.join(DLSS_FILE).exists());
+        assert!(!sandbox.game.join(DLSS_FILE).exists() && !sandbox.game.join(DLSS_IN_SUBDIR).exists());
     }
-}
+
+    /// An installation as the tool of 1.0.0-beta.2 left it, with DLSS through OptiScaler, in one of its two layouts
+    fn older_installation_with_optiscaler(sandbox: &Sandbox, menu: bool, dlss: &[u8]) {
+        let game = &sandbox.game;
+        let reshade = fs::read(sandbox.payload.join(P_RESHADE)).unwrap();
+        let optiscaler = b"OptiScaler.dll of the older release".to_vec();
+        fs::create_dir_all(game.join(SUBDIR)).unwrap();
+        let mut manifest = Manifest::default();
+        let mut put = |name: &str, content: &[u8]| {
+            fs::write(game.join(name), content).unwrap();
+            manifest.files.insert(name.to_string(), sys::sha256_file(&game.join(name)).unwrap());
+        };
+        for name in [P_ADDON, P_FFX_LOADER, P_FFX_UPSCALER] {
+            put(&format!("{}\\{}", SUBDIR, name), b"older build");
+        }
+        if menu {
+            put("dxgi.dll", &optiscaler);
+            put("ReShade64.dll", &reshade);
+        } else {
+            put("dxgi.dll", &reshade);
+            put("winmm.dll", &optiscaler);
+        }
+        put(DLSS_FILE, dlss);
+        fs::write(game.join(OPTI_INI), "[DLSS]\r\nRenderPresetOverride=true\r\nRenderPresetForAll=13\r\n").unwrap();
+        fs::write(game.join(RESHADE_INI), "[ADDON]\r\nAddonPath=.\\ACVUpscaler\r\n").unwrap();
+        fs::write(game.join(ADDON_INI), "[ACVUpscaler]\r\nMode=FSR31\r\nKeepContexts=1\r\n").unwrap();
+        for name in [OPTI_INI, RESHADE_INI, ADDON_INI] {
+            manifest.files.insert(name.to_string(), "-".into());
+        }
+        manifest.reshade_ini_created = true;
+        manifest.save(game).unwrap();
+    }
+
+    #[test]
+    fn an_installation_with_optiscaler_is_taken_over() {
+        for menu in [false, true] {
+            let sandbox = Sandbox::new(if menu { "takeover_menu" } else { "takeover_steam" });
+            let before = sandbox.listing();
+            let dlss = b"stand-in for nvngx_dlss.dll";
+            older_installation_with_optiscaler(&sandbox, menu, dlss);
+            let hash = sys::sha256_file(&sandbox.game.join(DLSS_FILE)).unwrap();
+            // The window shows what was installed: DLSS, with the model OptiScaler was set to
+            let found = read_choice(&sandbox.game);
+            assert_eq!((found.upscaler, found.model), (Upscaler::Dlss, Model::M));
+
+            // Apply: nothing to download, the DLSS file moves next to the add-on, OptiScaler and its files go
+            let plan = plan_install_for(&sandbox.game, &sandbox.payload, &found, None, &hash).unwrap();
+            assert!(!needs_download(&plan), "{:?}", plan);
+            apply_install(&sandbox.game, &found, &plan, None, &|_| unreachable!()).unwrap();
+            let listing = sandbox.listing();
+            assert_eq!(listing["dxgi.dll"], b"content of ReShade64.dll".to_vec());
+            assert_eq!(listing[DLSS_IN_SUBDIR], dlss.to_vec());
+            assert_eq!(listing["ACVUpscaler\\ACVUpscaler.addon64"], b"content of ACVUpscaler.addon64".to_vec());
+            for gone in ["winmm.dll", "ReShade64.dll", DLSS_FILE, OPTI_INI] {
+                assert!(!listing.contains_key(gone), "{} is still there", gone);
+            }
+            let addon_ini = sandbox.game.join(ADDON_INI);
+            assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "Upscaler"), "DLSS");
+            assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "DlssPreset"), "M");
+            assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "KeepContexts"), "0");
+            assert_eq!(read_choice(&sandbox.game), found);
+            assert_eq!(command_line(&sandbox.game, None), "--install --upscaler dlss --model m --gain 4");
+
+            // To FSR 3.1: the DLSS file goes as well
+            sandbox.install(&fsr()).unwrap();
+            assert!(!sandbox.game.join(DLSS_IN_SUBDIR).exists());
+            assert_eq!(sys::ini_get(&addon_ini, "ACVUpscaler", "Upscaler"), "FSR31");
+
+            uninstall(&sandbox.game, None).unwrap();
+            assert_eq!(sandbox.listing(), before);
+        }
+    }}
 
 // ---- The game's own settings file (Documents\Assassin's Creed Valhalla\ACValhalla.ini) ----
 
@@ -879,7 +941,13 @@ pub struct GameSettings {
     pub pixel_density: f32,
     /// The game's frame rate limit: on or off (`IsFpsLimitEnabled`) and its value (`MaxFPS`)
     pub fps_limit: Option<(bool, u32)>,
+    /// How detailed the game draws characters at a distance (`Character`, 0 to 4). The game's menu has no entry
+    /// for it and its presets stop at 2. `None` when the file does not have the key.
+    pub character: Option<u32>,
 }
+
+/// The highest value of the game's `Character` setting
+pub const CHARACTER_FULL: u32 = 4;
 
 pub fn game_ini_path(documents: &Path) -> PathBuf {
     documents.join(GAME_FOLDER).join("ACValhalla.ini")
@@ -936,6 +1004,7 @@ pub fn read_game_settings(path: &Path) -> Option<GameSettings> {
         output: (number("FullscreenWidth")? as u32, number("FullscreenHeight")? as u32),
         pixel_density: number("PixelDensity").unwrap_or(1.0),
         fps_limit: number("IsFpsLimitEnabled").zip(number("MaxFPS")).map(|(on, fps)| (on == 1.0, fps as u32)),
+        character: number("Character").map(|v| v as u32),
     })
 }
 
@@ -968,10 +1037,14 @@ pub fn set_game_quality(game: &Path, settings: &GameSettings, quality: Quality, 
 }
 
 /// Writes the game's settings file, with a backup copy before the first change ever
-fn write_game_ini(path: &Path, text: &str, log: &mut Vec<String>) -> Result<(), String> {
+fn game_ini_backup(path: &Path) -> PathBuf {
     let mut backup = path.to_path_buf().into_os_string();
     backup.push(".acvupscaler-backup");
-    let backup = PathBuf::from(backup);
+    PathBuf::from(backup)
+}
+
+fn write_game_ini(path: &Path, text: &str, log: &mut Vec<String>) -> Result<(), String> {
+    let backup = game_ini_backup(path);
     if !backup.exists() {
         fs::copy(path, &backup).map_err(|e| format!("could not back up the game's settings file: {}", e))?;
         log.push(format!("backup   {}", backup.display()));
@@ -1025,6 +1098,36 @@ pub fn set_game_render(
     Ok(log)
 }
 
+/// Characters in full detail also at a distance (`Character=4` in the game's settings file), or back to what the
+/// game had: the value in the backup copy of the file, or 2 without one. Nothing is written when the file already
+/// says so, or when it does not have the key.
+pub fn set_character_detail(ini: &Path, full: bool, game_exe_to_check: Option<&str>) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(ini).map_err(|e| format!("could not read {}: {}", ini.display(), e))?;
+    let value = |text: &str| text_ini_get(text, "Graphics", "Character").and_then(|v| v.parse::<u32>().ok());
+    let Some(current) = value(&text) else { return Ok(Vec::new()) };
+    let wanted = if full {
+        CHARACTER_FULL
+    } else if current == CHARACTER_FULL {
+        let before = fs::read_to_string(game_ini_backup(ini)).ok().and_then(|backup| value(&backup));
+        before.filter(|v| *v < CHARACTER_FULL).unwrap_or(2)
+    } else {
+        current
+    };
+    if wanted == current {
+        return Ok(Vec::new());
+    }
+    if let Some(exe) = game_exe_to_check {
+        if sys::process_running(exe) {
+            return Err("the game is running. Close it first: it writes its settings file when it exits.".into());
+        }
+    }
+    let changed = text_ini_set(&text, "Graphics", "Character", &wanted.to_string()).ok_or("Character is not in the game's settings file")?;
+    let mut log = Vec::new();
+    write_game_ini(ini, &changed, &mut log)?;
+    log.push(format!("settings {} (characters at a distance: {}, Character={})", ini.display(), if full { "full detail" } else { "as the game had them" }, wanted));
+    Ok(log)
+}
+
 /// Render size of the last session as the add-on saw it, for the given output size
 pub fn last_render_size(game: &Path, output: (u32, u32)) -> Option<(u32, u32)> {
     let scale: f32 = sys::ini_get(&game.join(ADDON_INI), "ACVUpscaler", "RenderScale").parse().ok()?;
@@ -1069,26 +1172,16 @@ pub fn summary(choice: &Choice, quality: Option<Quality>, settings: Option<&Game
             }
         }
     };
-    let overlay = if choice.upscaler == Upscaler::Dlss {
-        match choice.overlay {
-            Overlay::Steam => " Steam overlay works; no OptiScaler menu.",
-            Overlay::OptiMenu => " OptiScaler menu on Insert; no Steam overlay.",
-        }
-    } else {
-        ""
-    };
-    format!("You will play with: {}. {}{}", upscaler, resolution, overlay)
+    let reflex = if choice.reflex && choice.upscaler != Upscaler::Off { " Reflex low latency on." } else if choice.reflex { " Reflex low latency on (it works with the upscaler off as well)." } else { "" };
+    format!("You will play with: {}. {}{}", upscaler, resolution, reflex)
 }
 
 /// What needs a restart of the game, for the notes under the summary
-pub fn restart_notes(choice: &Choice) -> String {
+pub fn restart_notes() -> String {
     let mut notes = String::from(
         "Everything set here takes effect at the next start of the game. \
          If you change the FSR quality inside the game instead, restart the game once afterwards: the texture sharpness follows one start behind",
     );
-    if choice.upscaler == Upscaler::Dlss && choice.overlay == Overlay::Steam {
-        notes += ", and the previous DLSS stays in video memory until the game is closed";
-    }
     notes += ".";
     notes
 }
@@ -1105,6 +1198,31 @@ mod settings_tests {
         assert_eq!(Quality::Performance.render_size((2560, 1440)), (1280, 720));
         assert_eq!(Quality::Balanced.render_size((2560, 1440)), (1512, 848));
         assert_eq!(Quality::Quality.render_size((2560, 1440)), (1712, 960));
+    }
+
+    #[test]
+    fn characters_at_full_detail_and_back() {
+        let root = std::env::temp_dir().join(format!("acv_setup_test_characters_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ini = root.join("ACValhalla.ini");
+        // A file without the key is left alone
+        fs::write(&ini, SAMPLE).unwrap();
+        assert!(set_character_detail(&ini, true, None).unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&ini).unwrap(), SAMPLE);
+
+        let with_key = SAMPLE.replace("Antialiasing=2\n", "Antialiasing=2\nCharacter=1\n");
+        fs::write(&ini, &with_key).unwrap();
+        assert!(set_character_detail(&ini, false, None).unwrap().is_empty(), "off and not at 4: nothing to do");
+        set_character_detail(&ini, true, None).unwrap();
+        let settings = read_game_settings(&ini).unwrap();
+        assert_eq!(settings.character, Some(4));
+        assert!(game_render_args(Some(&settings)).ends_with(" --full-characters"));
+        assert_eq!(fs::read_to_string(&ini).unwrap(), with_key.replace("Character=1", "Character=4"));
+        // Back to the value of the backup copy, which was made before the first change
+        set_character_detail(&ini, false, None).unwrap();
+        assert_eq!(fs::read_to_string(&ini).unwrap(), with_key);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

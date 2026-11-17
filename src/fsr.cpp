@@ -1,4 +1,5 @@
 #include "fsr.hpp"
+#include "dlss.hpp"
 
 #include <d3dcompiler.h>
 #include <dx12/ffx_api_dx12.h>
@@ -282,26 +283,66 @@ void main(uint3 id : SV_DispatchThreadID)
 		return true;
 	}
 
-	bool Fsr::create_set(ID3D12Device *device, const Inputs &inputs, Set &set)
+	bool Fsr::create_set(ID3D12Device *device, ID3D12GraphicsCommandList *list, uint32_t width, uint32_t height, uint32_t out_width, uint32_t out_height, Set &set)
 	{
-		const uint32_t width = inputs.width, height = inputs.height;
+		set.width = width;
+		set.height = height;
+		set.out_width = out_width;
+		set.out_height = out_height;
+		if (!create_texture(device, width, height, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.motion) ||
+			!create_texture(device, width, height, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.depth) ||
+			!create_texture(device, width, height, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.reactive) ||
+			!create_texture(device, out_width, out_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_COPY_SOURCE, set.output))
+		{
+			_error = "textures could not be created";
+			return false;
+		}
+
+		// Test harness only: ACV_TEST_FAIL_CREATE=first,count makes the creations number first .. first + count - 1
+		// of this run fail here, as a failing ffxCreateContext would
+		static const std::pair<uint32_t, uint32_t> s_test_fail = []() {
+			char text[24];
+			const DWORD length = GetEnvironmentVariableA("ACV_TEST_FAIL_CREATE", text, sizeof(text));
+			std::pair<uint32_t, uint32_t> range { 0, 0 };
+			if (length != 0 && length < sizeof(text))
+				sscanf_s(text, "%u,%u", &range.first, &range.second);
+			return range;
+		}();
+		static uint32_t s_creations = 0;
+		if (++s_creations >= s_test_fail.first && s_creations - s_test_fail.first < s_test_fail.second)
+		{
+			_error = "creation failed for the test (ACV_TEST_FAIL_CREATE)";
+			return false;
+		}
+
+		// Upscaler=DLSS: the DLSS feature takes the place of the FSR context. Where it cannot, FSR 3.1 is set up
+		// in this same call, so no frame is lost; the next set (another size, a new swap chain) tries DLSS again.
+		const settings::Values &values = settings::get();
+		if (values.dlss && !_dlss_given_up)
+		{
+			std::string reason;
+			if (dlss::available(device, reason))
+			{
+				_list_touched = true;
+				set.dlss = dlss::create(list, width, height, out_width, out_height, values.dlss_preset, reason);
+			}
+			if (set.dlss != nullptr)
+			{
+				set.provider = values.dlss_preset == 13 ? "DLSS preset M" : values.dlss_preset == 11 ? "DLSS preset K" : "DLSS";
+				_dlss_reason.clear();
+				_dlss_failures = 0;
+				log::write("FSR: %s set up for %ux%u -> %ux%u in place of the FSR context", set.provider.c_str(), width, height, out_width, out_height);
+				return true;
+			}
+			if (reason != _dlss_reason)
+				log::warn("FSR: DLSS not started, FSR 3.1 does the work: %s", reason.c_str());
+			_dlss_reason = std::move(reason);
+		}
+
 		const FfxApi &api = ffx_api();
 		if (!api.loaded)
 		{
 			_error = "FidelityFX DLLs not loaded";
-			return false;
-		}
-
-		set.width = width;
-		set.height = height;
-		set.out_width = inputs.out_width;
-		set.out_height = inputs.out_height;
-		if (!create_texture(device, width, height, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.motion) ||
-			!create_texture(device, width, height, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.depth) ||
-			!create_texture(device, width, height, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, set.reactive) ||
-			!create_texture(device, inputs.out_width, inputs.out_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_COPY_SOURCE, set.output))
-		{
-			_error = "textures could not be created";
 			return false;
 		}
 
@@ -318,7 +359,7 @@ void main(uint3 id : SV_DispatchThreadID)
 		desc.header.pNext = &backend.header;
 		desc.flags = FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE;
 		desc.maxRenderSize = { width, height };
-		desc.maxUpscaleSize = { inputs.out_width, inputs.out_height };
+		desc.maxUpscaleSize = { out_width, out_height };
 		desc.fpMessage = &on_ffx_message;
 
 		const ffxReturnCode_t result = api.create(&set.context, &desc.header, nullptr);
@@ -332,11 +373,11 @@ void main(uint3 id : SV_DispatchThreadID)
 		ffxQueryGetProviderVersion provider = {};
 		provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
 		if (api.query(&set.context, &provider.header) == FFX_API_RETURN_OK && provider.versionName != nullptr)
-			_provider = provider.versionName;
+			set.provider = provider.versionName;
 		else
-			_provider = "unknown version";
+			set.provider = "unknown version";
 
-		log::write("FSR: context created for %ux%u -> %ux%u, provider %s", width, height, inputs.out_width, inputs.out_height, _provider.c_str());
+		log::write("FSR: context created for %ux%u -> %ux%u, provider %s", width, height, out_width, out_height, set.provider.c_str());
 		return true;
 	}
 
@@ -350,6 +391,7 @@ void main(uint3 id : SV_DispatchThreadID)
 
 	void Fsr::destroy_set(Set &set)
 	{
+		dlss::release(set.dlss);
 		if (set.context != nullptr)
 		{
 			const FfxApi &api = ffx_api();
@@ -360,10 +402,10 @@ void main(uint3 id : SV_DispatchThreadID)
 		set = Set();
 	}
 
-	void Fsr::begin_timer(ID3D12Device *device, ID3D12GraphicsCommandList *list)
+	uint32_t Fsr::begin_timer(ID3D12Device *device, ID3D12GraphicsCommandList *list)
 	{
 		if (!settings::get().dev_mode || _timer_failed)
-			return;
+			return UINT32_MAX;
 
 		if (_timer_heap == nullptr)
 		{
@@ -389,14 +431,14 @@ void main(uint3 id : SV_DispatchThreadID)
 				_timer_heap.Reset();
 				_timer_readback.Reset();
 				_timer_failed = true;
-				return;
+				return UINT32_MAX;
 			}
 			_timer_data = static_cast<const uint64_t *>(mapped);
 		}
 
 		// What this slot got kRing dispatches ago has long been run by the GPU
-		_timer_slot = _timer_next++ % kRing;
-		const uint64_t begin = _timer_data[_timer_slot * 2], end = _timer_data[_timer_slot * 2 + 1];
+		const uint32_t slot = _timer_next++ % kRing;
+		const uint64_t begin = _timer_data[slot * 2], end = _timer_data[slot * 2 + 1];
 		if (_timer_frequency != 0 && end > begin)
 		{
 			const double ms = static_cast<double>(end - begin) * 1000.0 / static_cast<double>(_timer_frequency);
@@ -412,7 +454,7 @@ void main(uint3 id : SV_DispatchThreadID)
 					SYSTEMTIME time;
 					GetLocalTime(&time);
 					std::fprintf(file, "%04u-%02u-%02u %02u:%02u:%02u  %s  %ux%u -> %ux%u  game sharpening %s, own %.0f %%  %.2f ms average, %.2f ms longest, %u frames\n",
-						time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, _provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height,
+						time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond, _set.provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height,
 						settings::game_sharpening() ? "on" : "off", static_cast<double>(_sharpness) * 100.0, _timer_ms, _timer_max_ms, kTimerWindow);
 					std::fclose(file);
 				}
@@ -421,39 +463,48 @@ void main(uint3 id : SV_DispatchThreadID)
 			}
 		}
 
-		list->EndQuery(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, _timer_slot * 2);
-		_timer_open = true;
+		list->EndQuery(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2);
+		return slot;
 	}
 
-	void Fsr::end_timer(ID3D12GraphicsCommandList *list)
+	void Fsr::end_timer(ID3D12GraphicsCommandList *list, uint32_t slot)
 	{
 		const std::lock_guard<std::mutex> lock(_mutex);
-		if (!_timer_open)
+		if (slot >= kRing || _timer_heap == nullptr)
 			return;
-		_timer_open = false;
-		list->EndQuery(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, _timer_slot * 2 + 1);
-		list->ResolveQueryData(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, _timer_slot * 2, 2, _timer_readback.Get(), _timer_slot * 2 * sizeof(uint64_t));
+		list->EndQuery(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
+		list->ResolveQueryData(_timer_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, _timer_readback.Get(), slot * 2 * sizeof(uint64_t));
 	}
 
-	bool Fsr::dispatch(ID3D12Device *device, ID3D12GraphicsCommandList *list, const Inputs &inputs)
+	bool Fsr::blocked(uint32_t width, uint32_t height, uint32_t out_width, uint32_t out_height, uint64_t frame) const
 	{
-		const std::lock_guard<std::mutex> lock(_mutex);
+		if (_failed_width == 0 || width != _failed_width || height != _failed_height || out_width != _failed_out_width || out_height != _failed_out_height)
+			return false;
+		return _failed_retries >= std::size(kRetryFrames) || frame < _failed_frame + kRetryFrames[_failed_retries];
+	}
 
-		if (_decode_failed || (inputs.width == _failed_width && inputs.height == _failed_height && inputs.out_width == _failed_out_width && inputs.out_height == _failed_out_height))
-			return false;
+	void Fsr::clear_failures()
+	{
+		_failed_width = _failed_height = _failed_out_width = _failed_out_height = 0;
+		_failed_frame = 0;
+		_failed_retries = 0;
+	}
 
-		if (!format_is(inputs.colour, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.width, inputs.height) ||
-			!format_is(inputs.velocity, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.width, inputs.height) ||
-			!format_is(inputs.linear_depth, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_TYPELESS, inputs.width, inputs.height))
+	// The GPU may still be working with the textures of the set: they are freed in 'on_present'
+	void Fsr::retire_set(uint64_t frame)
+	{
+		if (_set.usable() || _set.output != nullptr)
 		{
-			_error = "unexpected input formats";
-			return false;
+			_set.retired_frame = frame;
+			_retired.push_back(std::move(_set));
 		}
-		if (inputs.output != nullptr && !format_is(inputs.output, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.out_width, inputs.out_height))
-		{
-			_error = "unexpected output format";
+		_set = Set();
+	}
+
+	bool Fsr::ensure_set(ID3D12Device *device, ID3D12GraphicsCommandList *list, uint32_t width, uint32_t height, uint32_t out_width, uint32_t out_height, uint64_t frame, bool replace)
+	{
+		if (_decode_failed || blocked(width, height, out_width, out_height, frame))
 			return false;
-		}
 
 		if (_pipeline == nullptr && !create_decode_pass(device))
 		{
@@ -462,51 +513,115 @@ void main(uint3 id : SV_DispatchThreadID)
 			return false;
 		}
 
-		// Test harness only: ACV_TEST_RETIRE_AT=N replaces the context at dispatch N as a size change would
-		static const uint64_t s_test_retire_at = []() {
+		if (_set.usable() && _set.width == width && _set.height == height && _set.out_width == out_width && _set.out_height == out_height && !replace)
+			return true;
+
+		retire_set(frame);
+		if (!create_set(device, list, width, height, out_width, out_height, _set))
+		{
+			const bool again = width == _failed_width && height == _failed_height && out_width == _failed_out_width && out_height == _failed_out_height;
+			_failed_retries = again ? _failed_retries + 1 : 0;
+			log::warn("FSR: could not set up %ux%u -> %ux%u: %s (%s)", width, height, out_width, out_height, _error.c_str(),
+				_failed_retries < std::size(kRetryFrames) ? "will be tried again" : "not tried again before the resolution or the mode changes");
+			retire_set(frame); // Holds whatever was created before the failure
+			_failed_width = width;
+			_failed_height = height;
+			_failed_out_width = out_width;
+			_failed_out_height = out_height;
+			_failed_frame = frame;
+			return false;
+		}
+		clear_failures();
+		_reset = true;
+		return true;
+	}
+
+	bool Fsr::ready(uint32_t width, uint32_t height, uint64_t frame)
+	{
+		const std::lock_guard<std::mutex> lock(_mutex);
+		if (_decode_failed)
+			return false;
+		// The output size is not known yet. Only a failed upscale is told by its render size alone: at native
+		// resolution the dispatch is not deferred, and a failure there leaves the game's TAA running by itself.
+		if (width != _failed_width || height != _failed_height || (_failed_out_width == width && _failed_out_height == height))
+			return true;
+		return !blocked(width, height, _failed_out_width, _failed_out_height, frame);
+	}
+
+	// Test harness only: ACV_TEST_RETIRE_AT=N replaces the context once at dispatch N, as a size change would
+	bool Fsr::test_retire_due()
+	{
+		static const uint64_t s_at = []() {
 			char text[24];
 			const DWORD length = GetEnvironmentVariableA("ACV_TEST_RETIRE_AT", text, sizeof(text));
 			return length != 0 && length < sizeof(text) ? std::strtoull(text, nullptr, 10) : 0ull;
 		}();
-		const bool test_retire = s_test_retire_at != 0 && _dispatches == s_test_retire_at;
+		static bool s_done = false;
+		if (s_at == 0 || s_done || _dispatches != s_at)
+			return false;
+		s_done = true;
+		return true;
+	}
 
-		if (_set.context == nullptr || _set.width != inputs.width || _set.height != inputs.height || _set.out_width != inputs.out_width || _set.out_height != inputs.out_height || test_retire)
+	bool Fsr::prepare(ID3D12Device *device, ID3D12GraphicsCommandList *list, uint32_t width, uint32_t height, uint32_t out_width, uint32_t out_height, uint64_t frame, bool &list_changed)
+	{
+		const std::lock_guard<std::mutex> lock(_mutex);
+		list_changed = false;
+		const bool replace = test_retire_due();
+		// A set for this render size is left alone even if its output size is another one: the dispatch decides
+		// that, and replacing it here as well would create two sets per frame
+		if (!replace && _set.usable() && _set.width == width && _set.height == height)
+			return true;
+		_list_touched = false;
+		const bool ok = ensure_set(device, list, width, height, out_width, out_height, frame, replace);
+		list_changed = _list_touched;
+		return ok;
+	}
+
+	void Fsr::forget_failures()
+	{
+		const std::lock_guard<std::mutex> lock(_mutex);
+		_decode_failed = false;
+		_dlss_given_up = false;
+		clear_failures();
+	}
+
+	Fsr::Result Fsr::dispatch(ID3D12Device *device, ID3D12GraphicsCommandList *list, const Inputs &inputs)
+	{
+		const std::lock_guard<std::mutex> lock(_mutex);
+
+		if (_decode_failed || blocked(inputs.width, inputs.height, inputs.out_width, inputs.out_height, inputs.frame))
+			return {};
+
+		if (!format_is(inputs.colour, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.width, inputs.height) ||
+			!format_is(inputs.velocity, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.width, inputs.height) ||
+			!format_is(inputs.linear_depth, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_TYPELESS, inputs.width, inputs.height))
 		{
-			// The GPU may still be working with the old textures: they are freed in 'on_present'
-			if (_set.context != nullptr || _set.output != nullptr)
-			{
-				_set.retired_frame = inputs.frame;
-				_retired.push_back(std::move(_set));
-				_set = Set();
-			}
-			if (!create_set(device, inputs, _set))
-			{
-				log::warn("FSR: could not set up %ux%u -> %ux%u: %s", inputs.width, inputs.height, inputs.out_width, inputs.out_height, _error.c_str());
-				_set.retired_frame = inputs.frame; // Holds whatever was created before the failure
-				_retired.push_back(std::move(_set));
-				_set = Set();
-				_failed_width = inputs.width;
-				_failed_height = inputs.height;
-				_failed_out_width = inputs.out_width;
-				_failed_out_height = inputs.out_height;
-				return false;
-			}
-			_reset = true;
+			_error = "unexpected input formats";
+			return {};
 		}
+		if (inputs.output != nullptr && !format_is(inputs.output, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_TYPELESS, inputs.out_width, inputs.out_height))
+		{
+			_error = "unexpected output format";
+			return {};
+		}
+
+		_list_touched = false;
+		if (!ensure_set(device, list, inputs.width, inputs.height, inputs.out_width, inputs.out_height, inputs.frame, test_retire_due()))
+			return { false, nullptr, UINT32_MAX, _list_touched };
 
 		// Without a usable mask the shader reads zero from a null descriptor and FSR gets no reactive mask
 		const bool use_mask = inputs.mask != nullptr && inputs.reactive_gain > 0.0f &&
 			format_is(inputs.mask, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8_TYPELESS, inputs.width, inputs.height);
 
-		begin_timer(device, list);
+		const uint32_t timer_slot = begin_timer(device, list);
 
 		// Own sharpening: the upscaler writes an intermediate texture and the sharpening pass writes the result
-		bool sharpen = inputs.sharpness > 0.0f && _sharpen_pipeline != nullptr;
+		bool sharpen = inputs.sharpness > 0.0f && _sharpen_pipeline != nullptr && !_set.sharpen_failed;
 		if (sharpen && _set.presharp == nullptr && !create_texture(device, inputs.out_width, inputs.out_height, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, _set.presharp))
 		{
-			if (!_sharpen_failed)
-				log::warn("FSR: texture for the sharpening pass could not be created, the picture stays unsharpened");
-			_sharpen_failed = true;
+			log::warn("FSR: texture for the sharpening pass could not be created, the picture stays unsharpened");
+			_set.sharpen_failed = true;
 			sharpen = false;
 		}
 		_sharpness = sharpen ? inputs.sharpness : 0.0f;
@@ -599,35 +714,61 @@ void main(uint3 id : SV_DispatchThreadID)
 		}
 		_last_game_reset = inputs.reset;
 
-		const float width = static_cast<float>(inputs.width), height = static_cast<float>(inputs.height);
-		ffxDispatchDescUpscale desc = {};
-		desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
-		desc.commandList = list;
-		desc.color = ffxApiGetResourceDX12(inputs.colour, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
-		desc.depth = ffxApiGetResourceDX12(_set.depth.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-		desc.motionVectors = ffxApiGetResourceDX12(_set.motion.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-		if (use_mask)
-			desc.reactive = ffxApiGetResourceDX12(_set.reactive.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-		desc.output = ffxApiGetResourceDX12(sharpen ? _set.presharp.Get() : result_texture, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-		desc.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
-		desc.motionVectorScale = { width, height }; // The decoded vectors are in UV units
-		desc.renderSize = { inputs.width, inputs.height };
-		desc.upscaleSize = { inputs.out_width, inputs.out_height };
-		desc.enableSharpening = false;
-		desc.frameTimeDelta = delta_ms;
-		desc.preExposure = 1.0f;
-		desc.reset = reset;
+		ID3D12Resource *const upscale_target = sharpen ? _set.presharp.Get() : result_texture;
 		// Finite reversed Z: depth = b / distance - a, so near = b and far = b / a + b
-		desc.cameraNear = inputs.depth_b;
-		desc.cameraFar = inputs.depth_a > 0.0f ? inputs.depth_b / inputs.depth_a + inputs.depth_b : 100000.0f;
-		desc.cameraFovAngleVertical = inputs.fov_y;
-		desc.viewSpaceToMetersFactor = 1.0f;
-		desc.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+		const float camera_near = inputs.depth_b, camera_far = inputs.depth_a > 0.0f ? inputs.depth_b / inputs.depth_a + inputs.depth_b : 100000.0f;
+		bool upscaled = false;
+		std::string failure;
+		if (_set.dlss != nullptr)
+		{
+			// DLSS gets no reactive mask: it has no input of that meaning (docs/TECHNICAL.md, M5)
+			dlss::Eval eval;
+			eval.colour = inputs.colour;
+			eval.depth = _set.depth.Get();
+			eval.motion = _set.motion.Get();
+			eval.output = upscale_target;
+			eval.width = inputs.width;
+			eval.height = inputs.height;
+			eval.jitter_x = inputs.jitter_x;
+			eval.jitter_y = inputs.jitter_y;
+			eval.frame_ms = delta_ms;
+			eval.reset = reset;
+			upscaled = dlss::evaluate(list, _set.dlss, eval, failure);
+		}
+		else
+		{
+			const float width = static_cast<float>(inputs.width), height = static_cast<float>(inputs.height);
+			ffxDispatchDescUpscale desc = {};
+			desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+			desc.commandList = list;
+			desc.color = ffxApiGetResourceDX12(inputs.colour, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+			desc.depth = ffxApiGetResourceDX12(_set.depth.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+			desc.motionVectors = ffxApiGetResourceDX12(_set.motion.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+			if (use_mask)
+				desc.reactive = ffxApiGetResourceDX12(_set.reactive.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+			desc.output = ffxApiGetResourceDX12(upscale_target, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+			desc.jitterOffset = { inputs.jitter_x, inputs.jitter_y };
+			desc.motionVectorScale = { width, height }; // The decoded vectors are in UV units
+			desc.renderSize = { inputs.width, inputs.height };
+			desc.upscaleSize = { inputs.out_width, inputs.out_height };
+			desc.enableSharpening = false;
+			desc.frameTimeDelta = delta_ms;
+			desc.preExposure = 1.0f;
+			desc.reset = reset;
+			desc.cameraNear = camera_near;
+			desc.cameraFar = camera_far;
+			desc.cameraFovAngleVertical = inputs.fov_y;
+			desc.viewSpaceToMetersFactor = 1.0f;
+			desc.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
 
-		const ffxReturnCode_t result = ffx_api().dispatch(&_set.context, &desc.header);
+			const ffxReturnCode_t result = ffx_api().dispatch(&_set.context, &desc.header);
+			upscaled = result == FFX_API_RETURN_OK;
+			if (!upscaled)
+				failure = "ffxDispatch failed with code " + std::to_string(result);
+		}
 
 		// ---- Sharpening pass: intermediate texture -> result ----
-		if (sharpen && result == FFX_API_RETURN_OK)
+		if (sharpen && upscaled)
 		{
 			// Every descriptor of the table is written: not all hardware accepts unwritten ones
 			write_srv(_set.presharp.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -660,31 +801,35 @@ void main(uint3 id : SV_DispatchThreadID)
 			transition(_set.output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE) };
 		list->ResourceBarrier(barrier_count, to_rest);
 
-		if (result != FFX_API_RETURN_OK)
+		const bool by_dlss = _set.dlss != nullptr;
+		if (!upscaled)
 		{
 			if (_error.empty() || _dispatches != 0)
-				log::warn("FSR: ffxDispatch failed with code %u", result);
-			_error = "ffxDispatch failed with code " + std::to_string(result);
+				log::warn("FSR: %s", failure.c_str());
+			_error = failure;
 			_dispatches = 0;
 			_reset = true;
-			return false;
+			// DLSS that keeps failing makes way for FSR 3.1: the next dispatch sets that up
+			if (by_dlss && ++_dlss_failures >= 3)
+			{
+				log::warn("FSR: DLSS failed %u times in a row, FSR 3.1 does the work from here on", _dlss_failures);
+				_dlss_given_up = true;
+				_dlss_reason = std::move(failure);
+				retire_set(inputs.frame);
+			}
+			return { false, nullptr, timer_slot, by_dlss };
 		}
+		_dlss_failures = 0;
 
 		if (_dispatches++ == 0)
-			log::write("FSR: first dispatch recorded (render %ux%u, jitter %+.4f %+.4f, near %g far %g, fov %.2f deg, %.1f ms, reactive mask %s, output %s, DXGI format %u)", inputs.width, inputs.height,
-				static_cast<double>(inputs.jitter_x), static_cast<double>(inputs.jitter_y), static_cast<double>(desc.cameraNear), static_cast<double>(desc.cameraFar),
-				static_cast<double>(inputs.fov_y) * 57.29578, static_cast<double>(delta_ms), use_mask ? "from t3" : "not used",
+			log::write("FSR: first dispatch recorded (%s, render %ux%u, jitter %+.4f %+.4f, near %g far %g, fov %.2f deg, %.1f ms, reactive mask %s, output %s, DXGI format %u)", _set.provider.c_str(),
+				inputs.width, inputs.height, static_cast<double>(inputs.jitter_x), static_cast<double>(inputs.jitter_y), static_cast<double>(camera_near), static_cast<double>(camera_far),
+				static_cast<double>(inputs.fov_y) * 57.29578, static_cast<double>(delta_ms), by_dlss ? "not passed to DLSS" : use_mask ? "from t3" : "not used",
 				inputs.output != nullptr ? "written straight into the game's texture" : "the add-on's own texture",
 				static_cast<unsigned int>((inputs.output != nullptr ? inputs.output : _set.output.Get())->GetDesc().Format));
 		_reset = false;
 		_error.clear();
-		return true;
-	}
-
-	ID3D12Resource *Fsr::output()
-	{
-		const std::lock_guard<std::mutex> lock(_mutex);
-		return _set.output.Get();
+		return { true, _set.output.Get(), timer_slot, by_dlss || _list_touched };
 	}
 
 	void Fsr::reset_history()
@@ -724,7 +869,7 @@ void main(uint3 id : SV_DispatchThreadID)
 	void Fsr::shutdown()
 	{
 		const std::lock_guard<std::mutex> lock(_mutex);
-		if (_set.context != nullptr)
+		if (_set.usable())
 			log::write("FSR: context for %ux%u -> %ux%u destroyed after %llu frames", _set.width, _set.height, _set.out_width, _set.out_height, _dispatches);
 		for (Set &set : _retired)
 			destroy_set(set);
@@ -736,10 +881,27 @@ void main(uint3 id : SV_DispatchThreadID)
 		_sharpen_pipeline.Reset();
 		_root_signature.Reset();
 		_heap.Reset();
-		_timer_open = false;
 		_timer_data = nullptr;
 		_timer_readback.Reset();
 		_timer_heap.Reset();
+		// Whatever could not be created gets another try with the new swap chain
+		_decode_failed = false;
+		_timer_failed = false;
+		_dlss_given_up = false;
+		_dlss_failures = 0;
+		clear_failures();
+		_error.clear();
+	}
+
+	void Fsr::end_dlss(ID3D12Device *device)
+	{
+		const std::lock_guard<std::mutex> lock(_mutex);
+		// NGX must not end under a feature that is still alive ('shutdown' comes first): then it is left running
+		bool alive = _set.dlss != nullptr;
+		for (const Set &set : _retired)
+			alive = alive || set.dlss != nullptr;
+		if (!alive)
+			dlss::shutdown(device);
 	}
 
 	std::string Fsr::status()
@@ -748,9 +910,11 @@ void main(uint3 id : SV_DispatchThreadID)
 		std::string text;
 		if (!_error.empty())
 			append_format(text, "error: %s", _error.c_str());
-		else if (_set.context != nullptr)
+		else if (_set.usable())
 		{
-			append_format(text, "%s, %ux%u -> %ux%u, %llu frames", _provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height, _dispatches);
+			append_format(text, "%s, %ux%u -> %ux%u, %llu frames", _set.provider.c_str(), _set.width, _set.height, _set.out_width, _set.out_height, _dispatches);
+			if (!_dlss_reason.empty())
+				append_format(text, ", DLSS not started: %s", _dlss_reason.c_str());
 			if (_timer_ms > 0.0)
 				append_format(text, ", GPU %.2f ms", _timer_ms);
 			if (_sharpness > 0.0f)

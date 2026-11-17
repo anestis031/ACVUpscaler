@@ -1,6 +1,6 @@
 [package]
 name = "acvupscaler-setup"
-version = "1.0.0-beta.2"
+version = "1.0.0-beta.3"
 edition = "2021"
 description = "Settings and installation tool for ACVUpscaler (Assassin's Creed Valhalla)"
 license = "MIT"

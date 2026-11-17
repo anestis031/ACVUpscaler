@@ -3,10 +3,9 @@
 # Third-party binaries are taken from the official downloads in external\ (never from a game folder) and
 # their SHA-256 is checked against the values below before anything is packed:
 #   external\reshade_setup\ReShade_Setup_6.8.0_Addon.exe   from https://reshade.me
-#   external\OptiScaler_0.9.4\Optiscaler_0.9.4-final.20260718._MM.7z   from the OptiScaler v0.9.4 release
 #   external\FidelityFX-SDK\Kits\FidelityFX\signedbin\     from the FidelityFX SDK v2.4.0
-# Needs tar.exe of Windows 11 (reads .7z and the ReShade setup), the MSVC build of the add-on and cargo.
-param([string]$Version = "1.0.0-beta.2", [switch]$SkipBuild, [string]$Dist = "")
+# Needs tar.exe of Windows 11 (reads the ReShade setup), the MSVC build of the add-on and cargo.
+param([string]$Version = "1.0.0-beta.3", [switch]$SkipBuild, [string]$Dist = "")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 $tar = "$env:SystemRoot\System32\tar.exe"
@@ -50,22 +49,15 @@ Assert-Hash $reshadeSetup "afe4c8f13048306307983b8b3d41d5bf00a86820440b0e57dea10
 & $tar -xf $reshadeSetup -C "$out\payload" ReShade64.dll
 Assert-Hash "$out\payload\ReShade64.dll" "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7"
 
-# OptiScaler 0.9.4: the DLL and its settings file as shipped
-$optiArchive = "$root\external\OptiScaler_0.9.4\Optiscaler_0.9.4-final.20260718._MM.7z"
-Assert-Hash $optiArchive "575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad"
-& $tar -xf $optiArchive -C "$out\payload" OptiScaler.dll OptiScaler.ini
-Assert-Hash "$out\payload\OptiScaler.dll" "fbfb6676b829dad7e020fb830586a16aa0ec6add78016db48ef12e2ae1803231"
-
 # Licences
 Copy-Item "$root\LICENSE" "$out\licenses\ACVUpscaler-LICENSE.txt"
 Copy-Item "$root\THIRD_PARTY.md" "$out\licenses\THIRD_PARTY.md"
 Copy-Item "$root\external\reshade\LICENSE.md" "$out\licenses\ReShade-LICENSE.md"
 Copy-Item "$root\external\FidelityFX-SDK\docs\license.md" "$out\licenses\FidelityFX-LICENSE.md"
-$optiLicence = "$root\external\OptiScaler_0.9.4\LICENSE"
-if (-not (Test-Path $optiLicence)) {
-    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/optiscaler/OptiScaler/v0.9.4/LICENSE" -OutFile $optiLicence
-}
-Copy-Item $optiLicence "$out\licenses\OptiScaler-LICENSE.txt"
+# NVIDIA's NGX library is linked into the add-on when the DLSS SDK was there at build time
+if (Test-Path "$root\external\DLSS\LICENSE.txt") { Copy-Item "$root\external\DLSS\LICENSE.txt" "$out\licenses\NVIDIA-DLSS-SDK-LICENSE.txt" }
+# NVAPI is linked into the add-on when it was there at build time (Reflex)
+if (Test-Path "$root\external\nvapi\License.txt") { Copy-Item "$root\external\nvapi\License.txt" "$out\licenses\NVAPI-LICENSE.txt" }
 
 # Short text for people who open the zip without reading the repository
 foreach ($doc in "README.md", "INSTALL.md", "UNINSTALL.md") {

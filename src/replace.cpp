@@ -99,7 +99,9 @@ namespace acv
 		// Puts back what the decode pass and FSR changed on the list: descriptor heaps, compute root signature
 		// and pipeline. The root tables are set again as well, since they refer to the heaps.
 		// 'bound' is the record of the call being replaced; its tables tell which heaps the game has set.
-		void restore_list(ID3D12GraphicsCommandList *native, const PassRecord &bound, const replace::ListState &list)
+		// 'graphics_signature': DLSS recorded into the list. NGX does not say which state it leaves changed, so the
+		// graphics root signature is set again as well (FSR does not touch it).
+		void restore_list(ID3D12GraphicsCommandList *native, const PassRecord &bound, const replace::ListState &list, bool graphics_signature)
 		{
 			ID3D12DescriptorHeap *heaps[2] = {};
 			uint32_t heap_count = 0;
@@ -120,7 +122,8 @@ namespace acv
 					if (list.compute->table[i] != 0)
 						native->SetComputeRootDescriptorTable(i, { list.compute->table[i] });
 			}
-			// The graphics root signature was not touched
+			if (graphics_signature && list.graphics->layout != 0)
+				native->SetGraphicsRootSignature(reinterpret_cast<ID3D12RootSignature *>(static_cast<uintptr_t>(list.graphics->layout)));
 			for (uint32_t i = 0; i < list.graphics->used; ++i)
 				if (list.graphics->table[i] != 0)
 					native->SetGraphicsRootDescriptorTable(i, { list.graphics->table[i] });
@@ -235,11 +238,12 @@ namespace acv
 			if (direct)
 				inputs.output = reinterpret_cast<ID3D12Resource *>(static_cast<uintptr_t>(targets[0].handle));
 
-			const bool ok = data.fsr->dispatch(native_device, native_list, inputs);
-			const api::resource own_output = { reinterpret_cast<uintptr_t>(data.fsr->output()) };
+			const Fsr::Result result = data.fsr->dispatch(native_device, native_list, inputs);
+			const bool ok = result.ok;
+			const api::resource own_output = { reinterpret_cast<uintptr_t>(result.own_output) };
 			if (ok && !direct)
 				copy_to_targets(cmd_list, own_output, targets, target_count, target_state);
-			data.fsr->end_timer(native_list);
+			data.fsr->end_timer(native_list, result.timer_slot);
 			if (ok && direct && settings::get().dev_mode)
 			{
 				// Snapshots and recordings read the add-on's own output
@@ -248,7 +252,7 @@ namespace acv
 				cmd_list->barrier(targets[0], api::resource_usage::copy_source, target_state);
 			}
 			// Also after a failure: the list state may have been changed before it
-			restore_list(native_list, bound, list);
+			restore_list(native_list, bound, list, result.any_state_changed);
 
 			if (!ok)
 				return fail("FSR could not be dispatched (see the FSR lines in the log)");
@@ -270,6 +274,16 @@ namespace acv
 
 			return run_fsr(cmd_list, device, data, taa, taa, list, targets, target_count, api::resource_usage::render_target);
 		}
+
+		// The output of EASU or RCAS: the one texture bound for unordered access. It is in that state for the dispatch.
+		api::resource fsr1_output(const PassRecord &pass)
+		{
+			for (const BoundTable &table : pass.tables)
+				for (const BoundDescriptor &bound : table.descriptors)
+					if (bound.status == SlotStatus::Ok && bound.desc.type == DescType::Uav && bound.resource_known && bound.info.type == api::resource_type::texture_2d)
+						return { bound.desc.resource };
+			return { 0 };
+		}
 	}
 
 	replace::Result replace::at_taa(ReplaceMode mode, api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const ListState &list)
@@ -287,7 +301,12 @@ namespace acv
 			if (data.game_fsr1_seen.load(std::memory_order_relaxed))
 			{
 				Fsr::Inputs probe;
-				return gather_inputs(device, data, taa, probe) && passthrough(cmd_list, device, data, taa, list, true) ? Result::Deferred : Result::NotApplied;
+				if (!gather_inputs(device, data, taa, probe))
+					return Result::NotApplied;
+				// So is an upscaler that could not be set up for this size (the FSR lines of the log say why)
+				if (!data.fsr->ready(probe.width, probe.height, probe.frame))
+					return Result::NotApplied;
+				return passthrough(cmd_list, device, data, taa, list, true) ? Result::Deferred : Result::NotApplied;
 			}
 			return fsr_native(cmd_list, device, data, taa, list) ? Result::Applied : Result::NotApplied;
 		default:
@@ -295,14 +314,25 @@ namespace acv
 		}
 	}
 
+	bool replace::prepare_fsr1(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &pass, const ListState &list)
+	{
+		// What cannot be resolved here is left to 'at_fsr1' to report
+		const api::resource colour = input_texture(taa, kColourInput), output = fsr1_output(pass);
+		if (colour == 0 || output == 0)
+			return true;
+		const api::resource_desc colour_desc = device->get_resource_desc(colour), output_desc = device->get_resource_desc(output);
+		ID3D12GraphicsCommandList *const native_list = reinterpret_cast<ID3D12GraphicsCommandList *>(static_cast<uintptr_t>(cmd_list->get_native()));
+		bool list_changed = false;
+		const bool ok = data.fsr->prepare(reinterpret_cast<ID3D12Device *>(static_cast<uintptr_t>(device->get_native())), native_list, colour_desc.texture.width, colour_desc.texture.height,
+			output_desc.texture.width, output_desc.texture.height, data.frame_index.load(std::memory_order_relaxed) + 1, list_changed);
+		if (list_changed)
+			restore_list(native_list, pass, list, true);
+		return ok;
+	}
+
 	bool replace::at_fsr1(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &pass, const ListState &list)
 	{
-		// The output of EASU or RCAS: the one texture bound for unordered access. It is in that state for the dispatch.
-		api::resource output = { 0 };
-		for (const BoundTable &table : pass.tables)
-			for (const BoundDescriptor &bound : table.descriptors)
-				if (output == 0 && bound.status == SlotStatus::Ok && bound.desc.type == DescType::Uav && bound.resource_known && bound.info.type == api::resource_type::texture_2d)
-					output = { bound.desc.resource };
+		const api::resource output = fsr1_output(pass);
 		if (output == 0)
 			return fail("the output of the FSR 1 dispatch could not be resolved");
 
@@ -343,6 +373,9 @@ namespace acv
 	void replace::set_mode(DeviceData &data, ReplaceMode mode, const char *source)
 	{
 		data.replace_mode.store(static_cast<uint32_t>(mode), std::memory_order_relaxed);
+		// A switch by the user is a reason to try again what did not work before
+		data.fsr->forget_failures();
+		data.rcas_replace_failed.store(false, std::memory_order_relaxed);
 		log::write("%s: replacement switched to \"%s\" (frame %llu, %.2f ms per frame before the switch)", source, mode_name(mode),
 			data.frame_index.load(std::memory_order_relaxed), static_cast<double>(data.average_frame_ms.load(std::memory_order_relaxed)));
 		if (settings_enabled())

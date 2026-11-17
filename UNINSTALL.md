@@ -11,15 +11,18 @@ ReShade you updated yourself) is left where it is and named in the tool's log. I
 before, it stays and its `AddonPath` gets its old value back.
 
 The game's own settings file in `Documents\Assassin's Creed Valhalla` is not touched by uninstalling: the FSR
-quality you chose stays as it is, like any setting made in the game's menu. The copy
-`ACValhalla.ini.acvupscaler-backup` next to it is the file as it was before the tool first changed it.
+quality you chose stays as it is, like any setting made in the game's menu, and so does the detail of
+characters at a distance if you ticked it (untick it and press **Install / Apply** before uninstalling to put
+the game's value back). The copy `ACValhalla.ini.acvupscaler-backup` next to it is the file as it was before
+the tool first changed it.
 
 ## By hand
 
 Close the game and delete from the game folder:
 
 - `dxgi.dll`
-- `winmm.dll`, `ReShade64.dll`, `nvngx_dlss.dll`, `OptiScaler.ini`, `OptiScaler.log` (present with DLSS only)
+- `winmm.dll`, `ReShade64.dll`, `nvngx_dlss.dll`, `OptiScaler.ini`, `OptiScaler.log` (only left by DLSS of
+  1.0.0-beta.2 or older)
 - `ReShade.ini`, `ReShade.log`, `ReShadePreset.ini` (keep them if you use ReShade for something else, and
   remove only the `AddonPath` line from `ReShade.ini`)
 - the folder `ACVUpscaler`

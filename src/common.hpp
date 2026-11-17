@@ -15,7 +15,7 @@
 #include <exception>
 #include <string>
 
-#define ACV_VERSION "1.0.0-beta.2"
+#define ACV_VERSION "1.0.0-beta.3"
 
 namespace acv
 {
@@ -48,6 +48,11 @@ namespace acv
 			float reactive_gain = 4.0f;
 			bool lod_bias = true;       // Negative texture LOD bias from the render scale of the last session
 			bool keep_contexts = false; // Never call ffxDestroyContext (OptiScaler without its swap chain hooks)
+			// Upscaler=DLSS: the add-on calls DLSS itself (nvngx_dlss.dll next to it, dlss.hpp) and falls back to
+			// FSR 3.1 where that does not start. The default, FSR31, is also what OptiScaler intercepts.
+			bool dlss = false;
+			// DlssPreset=K|M|Default: the model, as the number NGX knows it by (K 11, M 13); 0 leaves the choice to DLSS
+			uint32_t dlss_preset = 11;
 		};
 		const Values &get();
 
@@ -58,9 +63,12 @@ namespace acv
 		// Strength in percent of the add-on's own sharpening pass (RCAS), which runs wherever the game's does not
 		// follow the upscaler: with GameSharpening=0 and at native resolution. 84 is the strength of the game's pass.
 		uint32_t sharpness();
+		// Reflex=1: NVIDIA Reflex low latency mode in its limited form (reflex.hpp). Off by default.
+		bool reflex();
 		// Take effect in the next frame. 'save' also writes the value to the file (not while a slider is dragged).
 		void set_game_sharpening(bool on);
 		void set_sharpness(uint32_t percent, bool save);
+		void set_reflex(bool on);
 		// False in the test harness (ACV_TEST_NO_SETTINGS): the defaults apply there, with the developer tools on
 		bool file_enabled();
 		std::wstring path();

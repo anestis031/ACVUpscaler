@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0-beta.3
+
+- DLSS is called by the add-on itself, through NVIDIA's DLSS SDK. OptiScaler is no longer needed and no longer
+  in the package, and with it the choice between the Steam overlay and OptiScaler's menu is gone. Where DLSS
+  cannot start, FSR 3.1 runs and the panel says why. The setup tool takes over an installation of an older version and moves the DLSS file without
+  downloading it again.
+- NVIDIA Reflex low latency in a limited form, off by default: a checkbox in the setup tool and in the add-on's
+  panel.
+- If the upscaler cannot be set up for a resolution, the game's own anti-aliasing and FSR 1 run in the
+  meantime and the upscaler is tried again, instead of the picture staying without anti-aliasing until the game
+  is closed.
+- Setup tool: option for the game's hidden setting for the detail of characters at a distance.
+- README with diagrams of what the mod does and how it works.
+
 ## 1.0.0-beta.2
 
 - Camera cuts in cutscenes: the frame of the cut is left to the game, and the upscaler starts without history

@@ -24,26 +24,50 @@ if(NOT EXISTS "${FFX_DIR}/signedbin/amd_fidelityfx_loader_dx12.dll")
     message(FATAL_ERROR "FidelityFX SDK not found in ${FFX_DIR} (run tools/fetch_deps.cmd).")
 endif()
 
+# NVIDIA DLSS SDK 310.9.16 (NGX headers and static library), optional. Without it the add-on is built without its
+# own DLSS path and Upscaler=DLSS falls back to FSR 3.1.
+set(DLSS_DIR "${CMAKE_SOURCE_DIR}/external/DLSS")
+set(DLSS_LIB "${DLSS_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib") # Built for the static CRT, like the add-on
+if(EXISTS "${DLSS_DIR}/include/nvsdk_ngx.h" AND EXISTS "${DLSS_LIB}")
+    option(ACV_WITH_DLSS "Build the DLSS path (NVIDIA NGX SDK)" ON)
+else()
+    message(STATUS "NVIDIA DLSS SDK not found in ${DLSS_DIR}: the add-on is built without DLSS (run tools/fetch_deps.cmd).")
+    set(ACV_WITH_DLSS OFF CACHE BOOL "Build the DLSS path (NVIDIA NGX SDK)" FORCE)
+endif()
+
+# NVIDIA NVAPI R620 (header and nvapi64.lib, MIT), optional. Without it the add-on is built without Reflex.
+set(NVAPI_DIR "${CMAKE_SOURCE_DIR}/external/nvapi")
+if(EXISTS "${NVAPI_DIR}/nvapi.h" AND EXISTS "${NVAPI_DIR}/amd64/nvapi64.lib")
+    option(ACV_WITH_REFLEX "Build the Reflex low latency mode (NVIDIA NVAPI)" ON)
+else()
+    message(STATUS "NVIDIA NVAPI not found in ${NVAPI_DIR}: the add-on is built without Reflex (run tools/fetch_deps.cmd).")
+    set(ACV_WITH_REFLEX OFF CACHE BOOL "Build the Reflex low latency mode (NVIDIA NVAPI)" FORCE)
+endif()
+
 add_library(ACVUpscaler SHARED
     src/addon.cpp
     src/autotest.cpp
     src/descriptors.cpp
+    src/dlss.cpp
     src/fsr.cpp
     src/frame.cpp
     src/overlay.cpp
     src/pipelines.cpp
     src/record.cpp
+    src/reflex.cpp
     src/replace.cpp
     src/settings.cpp
     src/snapshot.cpp
     src/autotest.hpp
     src/common.hpp
     src/descriptors.hpp
+    src/dlss.hpp
     src/dxbc.hpp
     src/frame.hpp
     src/fsr.hpp
     src/overlay.hpp
     src/pipelines.hpp
+    src/reflex.hpp
     src/replace.hpp
     src/snapshot.hpp)
 
@@ -54,6 +78,18 @@ target_include_directories(ACVUpscaler SYSTEM PRIVATE
     "${FFX_DIR}/upscalers/include")
 
 target_link_libraries(ACVUpscaler PRIVATE d3d12 d3dcompiler)
+
+if(ACV_WITH_DLSS)
+    target_include_directories(ACVUpscaler SYSTEM PRIVATE "${DLSS_DIR}/include")
+    target_link_libraries(ACVUpscaler PRIVATE "${DLSS_LIB}")
+    target_compile_definitions(ACVUpscaler PRIVATE ACV_WITH_DLSS)
+endif()
+
+if(ACV_WITH_REFLEX)
+    target_include_directories(ACVUpscaler SYSTEM PRIVATE "${NVAPI_DIR}")
+    target_link_libraries(ACVUpscaler PRIVATE "${NVAPI_DIR}/amd64/nvapi64.lib")
+    target_compile_definitions(ACVUpscaler PRIVATE ACV_WITH_REFLEX)
+endif()
 
 target_compile_definitions(ACVUpscaler PRIVATE
     WIN32_LEAN_AND_MEAN

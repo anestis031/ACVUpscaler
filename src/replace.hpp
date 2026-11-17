@@ -28,6 +28,9 @@ namespace acv::replace
 
 	// Recording thread, before the first TAA draw of a command list is recorded
 	Result at_taa(ReplaceMode mode, api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const ListState &list);
+	// Recording thread, before the EASU dispatch 'pass' of such a list is skipped for a run at the RCAS dispatch:
+	// sets the upscaler up for the output size. False: it could not be set up, EASU must not be skipped.
+	bool prepare_fsr1(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &pass, const ListState &list);
 	// Recording thread, before the EASU or the RCAS dispatch 'pass' of a list whose TAA returned 'Deferred'.
 	// Returns true when the output of that dispatch was written, so the dispatch has to be skipped.
 	bool at_fsr1(api::command_list *cmd_list, api::device *device, DeviceData &data, const PassRecord &taa, const PassRecord &pass, const ListState &list);

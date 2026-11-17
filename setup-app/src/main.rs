@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::Shell::{SHBrowseForFolderW, SHGetPathFromIDListW, ShellExecuteW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::core::{Choice, GameSettings, Model, Overlay, Quality, Upscaler};
+use crate::core::{Choice, GameSettings, Model, Quality, Upscaler};
 
 // Messages of the trackbar and the edit control (commctrl.h, winuser.h)
 const TBM_GETPOS: u32 = 0x0400;
@@ -34,8 +34,6 @@ const ID_DLSS: usize = 101;
 const ID_FSR: usize = 102;
 const ID_OFF: usize = 103;
 const ID_MODEL: usize = 104;
-const ID_STEAM: usize = 105;
-const ID_MENU: usize = 106;
 const ID_GAIN: usize = 107;
 const ID_LOD: usize = 108;
 const ID_DEV: usize = 109;
@@ -46,6 +44,8 @@ const ID_CLOSE: usize = 113;
 const ID_QUALITY: usize = 114;
 const ID_SHARPEN: usize = 115;
 const ID_SHARPNESS: usize = 119;
+const ID_CHARACTERS: usize = 120;
+const ID_REFLEX: usize = 121;
 
 struct App {
     window: HWND,
@@ -55,15 +55,15 @@ struct App {
     fsr: HWND,
     off: HWND,
     model: HWND,
-    steam: HWND,
-    menu: HWND,
     gain_label: HWND,
     gain: HWND,
     lod: HWND,
     sharpen: HWND,
     sharpness_label: HWND,
     sharpness: HWND,
+    reflex: HWND,
     dev: HWND,
+    characters: HWND,
     apply: HWND,
     uninstall: HWND,
     log: HWND,
@@ -140,12 +140,12 @@ impl App {
                 Upscaler::Fsr31
             },
             model,
-            overlay: if checked(self.menu) { Overlay::OptiMenu } else { Overlay::Steam },
             gain: unsafe { SendMessageW(self.gain, TBM_GETPOS, 0, 0) } as u32,
             lod_bias: checked(self.lod),
             game_sharpening: checked(self.sharpen),
             sharpness: unsafe { SendMessageW(self.sharpness, TBM_GETPOS, 0, 0) } as u32,
             dev_mode: checked(self.dev),
+            reflex: checked(self.reflex),
         }
     }
 
@@ -160,11 +160,10 @@ impl App {
         set_checked(self.dlss, choice.upscaler == Upscaler::Dlss);
         set_checked(self.fsr, choice.upscaler == Upscaler::Fsr31);
         set_checked(self.off, choice.upscaler == Upscaler::Off);
-        set_checked(self.steam, choice.overlay == Overlay::Steam);
-        set_checked(self.menu, choice.overlay == Overlay::OptiMenu);
         set_checked(self.lod, choice.lod_bias);
         set_checked(self.sharpen, choice.game_sharpening);
         set_checked(self.dev, choice.dev_mode);
+        set_checked(self.reflex, choice.reflex);
         let index = match choice.model {
             Model::K => 0,
             Model::M => 1,
@@ -183,16 +182,15 @@ impl App {
         let have_game = self.game.is_some();
         let dlss = checked(self.dlss);
         unsafe {
-            for control in [self.model, self.steam, self.menu] {
-                EnableWindow(control, i32::from(have_game && dlss));
-            }
-            for control in [self.dlss, self.fsr, self.off, self.gain, self.lod, self.sharpen, self.dev, self.apply] {
+            EnableWindow(self.model, i32::from(have_game && dlss));
+            for control in [self.dlss, self.fsr, self.off, self.gain, self.lod, self.sharpen, self.reflex, self.dev, self.apply] {
                 EnableWindow(control, i32::from(have_game));
             }
             // The add-on's own sharpening takes the place of the game's pass
             EnableWindow(self.sharpness, i32::from(have_game && !checked(self.sharpen)));
             EnableWindow(self.uninstall, i32::from(self.game.as_deref().is_some_and(core::is_installed)));
             EnableWindow(self.quality, i32::from(have_game && self.settings.is_some()));
+            EnableWindow(self.characters, i32::from(have_game && self.settings.as_ref().is_some_and(|s| s.character.is_some())));
         }
         set_text(self.gain_label, &format!("Particle mask strength (rain, fire): {}", unsafe { SendMessageW(self.gain, TBM_GETPOS, 0, 0) }));
         set_text(
@@ -208,11 +206,12 @@ impl App {
             }
         }
         set_text(self.summary, &summary);
-        set_text(self.notes, &core::restart_notes(&choice));
+        set_text(self.notes, &core::restart_notes());
     }
 
     fn refresh(&mut self) {
         self.settings = load_game_settings();
+        set_checked(self.characters, self.settings.as_ref().is_some_and(|s| s.character == Some(core::CHARACTER_FULL)));
         let index = self.settings.as_ref().filter(|s| s.fsr_on).and_then(|s| s.quality).and_then(|q| Quality::ALL.iter().position(|x| *x == q));
         unsafe {
             SendMessageW(self.quality, CB_SETCURSEL, index.map_or(usize::MAX, |i| i), 0);
@@ -298,6 +297,16 @@ impl App {
                 );
             }
         }
+        let full_characters = checked(self.characters);
+        if let Some(settings) = self.settings.as_ref().filter(|s| s.character.is_some()) {
+            if (settings.character == Some(core::CHARACTER_FULL)) != full_characters {
+                question += &format!(
+                    "\r\nIn the game's settings file ({}) the detail of characters at a distance is set {}. A backup copy of the file is made the first time.\r\n",
+                    settings.path.display(),
+                    if full_characters { "to its highest value (Character=4)" } else { "back to what the game had" }
+                );
+            }
+        }
         question += "\r\nNo file in the game folder that belongs to the game is touched. Continue?";
         if message(self.window, &question, MB_YESNO | MB_ICONQUESTION) != IDYES {
             return;
@@ -309,7 +318,7 @@ impl App {
         if core::needs_download(&actions) {
             self.append_log(&["downloading DLSS, this can take a minute ...".into()]);
         }
-        let result = core::apply_install(&game, &self.payload, &choice, &actions, Some(core::GAME_EXE), &|path| sys::download(core::DLSS_URL, path));
+        let result = core::apply_install(&game, &choice, &actions, Some(core::GAME_EXE), &|path| sys::download(core::DLSS_URL, path));
         unsafe {
             SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
         }
@@ -317,6 +326,9 @@ impl App {
         let result = result.and_then(|mut lines| {
             if let (Some(quality), Some(settings)) = (quality, &self.settings) {
                 lines.extend(core::set_game_quality(&game, settings, quality, Some(core::GAME_EXE))?);
+            }
+            if let Some(settings) = &self.settings {
+                lines.extend(core::set_character_detail(&settings.path, full_characters, Some(core::GAME_EXE))?);
             }
             Ok(lines)
         });
@@ -395,7 +407,7 @@ unsafe fn create_controls(window: HWND) -> App {
     let status = c(w!("STATIC"), "", 0, 0, (12, 40, 560, 34), 0);
 
     c(w!("BUTTON"), "Upscaler", BS_GROUPBOX as u32, 0, (12, 78, 560, 94), 0);
-    let dlss = c(w!("BUTTON"), "DLSS - best picture, NVIDIA RTX cards only (uses OptiScaler)", radio | WS_GROUP, 0, (24, 98, 536, 20), ID_DLSS);
+    let dlss = c(w!("BUTTON"), "DLSS - best picture, NVIDIA RTX cards only", radio | WS_GROUP, 0, (24, 98, 536, 20), ID_DLSS);
     let fsr = c(w!("BUTTON"), "FSR 3.1 - works on every graphics card", radio, 0, (24, 121, 536, 20), ID_FSR);
     let off = c(w!("BUTTON"), "Off - the game's own anti-aliasing and FSR 1", radio, 0, (24, 144, 536, 20), ID_OFF);
 
@@ -412,8 +424,7 @@ unsafe fn create_controls(window: HWND) -> App {
     for item in [w!("K - fast, recommended for RTX 20 and 30 series"), w!("M - a little sharper, clearly slower on RTX 20 and 30 series"), w!("Default of the DLSS file")] {
         SendMessageW(model, CB_ADDSTRING, 0, item as isize);
     }
-    let steam = c(w!("BUTTON"), "Keep the Steam overlay (OptiScaler's own menu is not available)", radio | WS_GROUP, 0, (24, 260, 536, 20), ID_STEAM);
-    let menu = c(w!("BUTTON"), "OptiScaler's menu on the Insert key (the Steam overlay does not show)", radio, 0, (24, 283, 536, 20), ID_MENU);
+    c(w!("STATIC"), "The add-on runs DLSS itself. Its file, nvngx_dlss.dll, is NVIDIA's: it is downloaded from NVIDIA's GitHub and is not part of this tool.", 0, 0, (24, 260, 536, 40), 0);
 
     let gain_label = c(w!("STATIC"), "", 0, 0, (12, 322, 300, 18), 0);
     let gain = c(w!("msctls_trackbar32"), "", TBS_AUTOTICKS | WS_TABSTOP, 0, (316, 318, 256, 28), ID_GAIN);
@@ -423,23 +434,25 @@ unsafe fn create_controls(window: HWND) -> App {
     let sharpness_label = c(w!("STATIC"), "", 0, 0, (30, 400, 290, 18), 0);
     let sharpness = c(w!("msctls_trackbar32"), "", WS_TABSTOP, 0, (316, 396, 256, 24), ID_SHARPNESS);
     SendMessageW(sharpness, TBM_SETRANGE, 1, (100 << 16) as isize);
-    let dev = c(w!("BUTTON"), "Developer tools (keys F6 to F10 in the game, detailed log)", check, 0, (12, 424, 560, 20), ID_DEV);
+    let reflex = c(w!("BUTTON"), "NVIDIA Reflex low latency (NVIDIA cards; also a checkbox in the add-on's panel in the game)", check, 0, (12, 424, 560, 20), ID_REFLEX);
+    let dev = c(w!("BUTTON"), "Developer tools (keys F6 to F10 in the game, detailed log)", check, 0, (12, 447, 560, 20), ID_DEV);
+    let characters = c(w!("BUTTON"), "Characters in full detail at a distance (a setting the game's own menu does not show)", check, 0, (12, 470, 560, 20), ID_CHARACTERS);
 
     // What the choices above amount to, and what needs a restart of the game
-    let summary = c(w!("STATIC"), "", 0, WS_EX_STATICEDGE, (12, 453, 560, 54), 0);
-    let notes = c(w!("STATIC"), "", 0, 0, (12, 513, 560, 52), 0);
+    let summary = c(w!("STATIC"), "", 0, WS_EX_STATICEDGE, (12, 499, 560, 54), 0);
+    let notes = c(w!("STATIC"), "", 0, 0, (12, 559, 560, 52), 0);
 
-    let apply = c(w!("BUTTON"), "Install / Apply", push | BS_DEFPUSHBUTTON as u32, 0, (12, 571, 150, 28), ID_APPLY);
-    let uninstall = c(w!("BUTTON"), "Uninstall", push, 0, (170, 571, 110, 28), ID_UNINSTALL);
-    c(w!("BUTTON"), "Open game folder", push, 0, (288, 571, 150, 28), ID_OPEN);
-    c(w!("BUTTON"), "Close", push, 0, (462, 571, 110, 28), ID_CLOSE);
+    let apply = c(w!("BUTTON"), "Install / Apply", push | BS_DEFPUSHBUTTON as u32, 0, (12, 617, 150, 28), ID_APPLY);
+    let uninstall = c(w!("BUTTON"), "Uninstall", push, 0, (170, 617, 110, 28), ID_UNINSTALL);
+    c(w!("BUTTON"), "Open game folder", push, 0, (288, 617, 150, 28), ID_OPEN);
+    c(w!("BUTTON"), "Close", push, 0, (462, 617, 110, 28), ID_CLOSE);
 
     let log = c(
         w!("EDIT"),
         "",
         ES_READONLY as u32 | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL,
         WS_EX_CLIENTEDGE,
-        (12, 609, 560, 110),
+        (12, 655, 560, 110),
         0,
     );
 
@@ -451,15 +464,15 @@ unsafe fn create_controls(window: HWND) -> App {
         fsr,
         off,
         model,
-        steam,
-        menu,
         gain_label,
         gain,
         lod,
         sharpen,
         sharpness_label,
         sharpness,
+        reflex,
         dev,
+        characters,
         apply,
         uninstall,
         log,
@@ -513,7 +526,7 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wparam: WPARAM, lp
                     DestroyWindow(window);
                 }
                 // Any change of a choice updates the summary
-                ID_DLSS | ID_FSR | ID_OFF | ID_STEAM | ID_MENU | ID_MODEL | ID_QUALITY | ID_LOD | ID_SHARPEN | ID_DEV => with_app(|app| app.update_enabled()),
+                ID_DLSS | ID_FSR | ID_OFF | ID_MODEL | ID_QUALITY | ID_LOD | ID_SHARPEN | ID_DEV | ID_REFLEX => with_app(|app| app.update_enabled()),
                 _ => {}
             }
             0
@@ -553,12 +566,12 @@ fn run_window() {
 
         let scale = GetDpiForSystem() as f32 / 96.0;
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut rect = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: (584.0 * scale) as i32, bottom: (731.0 * scale) as i32 };
+        let mut rect = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: (584.0 * scale) as i32, bottom: (777.0 * scale) as i32 };
         AdjustWindowRect(&mut rect, style, 0);
         let window = CreateWindowExW(
             0,
             w!("ACVUpscalerSetup"),
-            w!("ACVUpscaler Setup 1.0.0-beta.2"),
+            w!("ACVUpscaler Setup 1.0.0-beta.3"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -585,8 +598,8 @@ fn run_window() {
 
 /// `--game-dir <dir> --install|--uninstall|--show [options]`: no window, the result goes to `--log <file>`.
 /// `--show` changes nothing and reports the present installation as the options that would recreate it.
-/// Options: `--payload <dir>`, `--upscaler dlss|fsr31|off`, `--model k|m|default`, `--overlay steam|menu`,
-/// `--gain <0..16>`, `--no-lod-bias`, `--no-game-sharpening`, `--sharpness <0..100>` (the add-on's own sharpening), `--dev`, `--dlss-file <file>` (use this copy instead of downloading),
+/// Options: `--payload <dir>`, `--upscaler dlss|fsr31|off`, `--model k|m|default`, (`--overlay` and `--legacy-optiscaler` of older versions are accepted and ignored),
+/// `--gain <0..16>`, `--no-lod-bias`, `--no-game-sharpening`, `--sharpness <0..100>` (the add-on's own sharpening), `--dev`, `--reflex` (low latency mode on; without it off), `--full-characters` (the game's hidden `Character` setting at 4; without it back to what the game had), `--dlss-file <file>` (use this copy instead of downloading),
 /// `--quality uq|quality|balanced|performance` with `--game-ini <file>` (the game's own settings file; default:
 /// the one in Documents), `--no-running-check`. For test series also `--quality native` (the game's FSR off) and
 /// `--pixel-density <0.5..2>` (the game's resolution scale) and `--fps-limit <fps>|off|off,<fps>` (the game's
@@ -609,12 +622,12 @@ fn run_command_line(args: &[String]) -> i32 {
             Some("default") => Model::Default,
             _ => Model::K,
         },
-        overlay: if value("--overlay").as_deref() == Some("menu") { Overlay::OptiMenu } else { Overlay::Steam },
         gain: value("--gain").and_then(|v| v.parse().ok()).unwrap_or(4).min(16),
         lod_bias: !flag("--no-lod-bias"),
         game_sharpening: !flag("--no-game-sharpening"),
         sharpness: value("--sharpness").and_then(|v| v.parse().ok()).unwrap_or(0).min(100),
         dev_mode: flag("--dev"),
+        reflex: flag("--reflex"),
     };
     let dlss_file = value("--dlss-file").map(PathBuf::from);
 
@@ -649,8 +662,11 @@ fn run_command_line(args: &[String]) -> i32 {
         core::uninstall(&game, running_check).and_then(set_render)
     } else if flag("--install") {
         core::plan_install(&game, &payload, &choice, dlss_file.as_deref())
-            .and_then(|actions| core::apply_install(&game, &payload, &choice, &actions, running_check, &|path| sys::download(core::DLSS_URL, path)))
+            .and_then(|actions| core::apply_install(&game, &choice, &actions, running_check, &|path| sys::download(core::DLSS_URL, path)))
             .and_then(|mut lines| {
+                if let Some(ini) = game_ini.as_deref().filter(|ini| ini.is_file()) {
+                    lines.extend(core::set_character_detail(ini, flag("--full-characters"), running_check)?);
+                }
                 if let Some(quality) = quality {
                     let ini = value("--game-ini").map(PathBuf::from).or_else(|| sys::documents_dir().map(|d| core::game_ini_path(&d)));
                     let settings = ini.as_deref().and_then(core::read_game_settings).ok_or("the game's settings file was not found")?;

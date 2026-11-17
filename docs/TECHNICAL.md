@@ -52,8 +52,8 @@ axis made a still image measurably softer.
 
 - Game FSR 1 on: the three TAA draws are skipped and t0 is copied into RT0 and RT1 (the TAA history, so that
   the game's own TAA finds a sane one in the frames left to it). At the EASU dispatch a small
-  compute pass decodes velocity, distance and mask, then `ffxDispatch` upscales t0 to the display size straight
-  into EASU's output texture. EASU is skipped, the game's RCAS still runs. With `GameSharpening=0` the same
+  compute pass decodes velocity, distance and mask, then the upscaler (`ffxDispatch`, or DLSS) upscales t0 to the
+  display size straight into EASU's output texture. EASU is skipped, the game's RCAS still runs. With `GameSharpening=0` the same
   happens at the RCAS dispatch, into RCAS's output texture, and both EASU and RCAS are skipped.
 - Game FSR 1 off: the upscaler runs at the TAA draws in native anti-aliasing mode and writes RT0 and RT1.
 - Camera cuts: at a cut inside a cutscene the game binds a 4x4 texture of zeros as t1 for one frame, and leaves
@@ -66,7 +66,10 @@ axis made a still image measurably softer.
   settings can be changed from the add-on's panel while the game runs.
 - Colour is tonemapped 8-bit, so the context has the non-linear colour space flag and the dispatch the sRGB
   flag, with pre-exposure 1 and no auto exposure. Depth is inverted.
-- The reactive mask is `min(t3 * gain, 0.9)`.
+- The reactive mask is `min(t3 * gain, 0.9)`, for FSR 3.1 only.
+- If the upscaler cannot be set up for a size, the game's TAA, EASU and RCAS run untouched; the size is tried
+  again 16 frames later and once more about 1800 frames after that, and afresh after a new swap chain or a
+  switch of the mode.
 - Texture LOD bias: the game creates all samplers once at start with bias 0. In ReShade's `init_sampler` event
   the add-on writes the anisotropic heap samplers again with `log2(render width / display width)` added.
   (`create_sampler` cannot be used: it also fires for static samplers, and changing those makes ReShade rebuild
@@ -74,24 +77,53 @@ axis made a still image measurably softer.
 - `ffxDestroyContext` is called from `destroy_effect_runtime` after the queue is idle, and for replaced contexts
   eight presents after the replacement. Called from `destroy_device` it never returned.
 
-## DLSS through OptiScaler
+## DLSS (`src/dlss.cpp`)
 
-OptiScaler hooks library loading, recognises AMD's FidelityFX DLLs by file name wherever they are loaded from,
-and detours the `ffx*` functions. The add-on's calls are therefore redirected without any change on its side.
-Two layouts work:
+With `Upscaler=DLSS` the add-on calls DLSS through NVIDIA's NGX SDK. A DLSS feature takes the place of the FSR
+context; the decode pass, the own sharpening pass and the place the result is written to are shared with FSR 3.1.
 
-- OptiScaler as `dxgi.dll`, loading ReShade as `ReShade64.dll`: OptiScaler wraps the swap chain, its menu works,
-  the Steam overlay does not show.
-- OptiScaler as `winmm.dll` behind ReShade as `dxgi.dll`: no swap chain wrapper, the Steam overlay works,
-  OptiScaler's menu cannot draw. In this layout the game ended right after OptiScaler released the DLSS features
-  of replaced contexts, so with `KeepContexts=1` the add-on never calls `ffxDestroyContext`.
+- NGX is started for the device at the first use (`NVSDK_NGX_D3D12_Init_with_ProjectID`, engine type custom),
+  with the add-on's folder as the place to look for `nvngx_dlss.dll`. Without the file, on a card without DLSS
+  or with a driver that is too old, FSR 3.1 is set up in the same call and the panel names the reason.
+- Feature flags: low-resolution motion vectors, inverted depth; no HDR, no auto exposure, no exposure texture,
+  no mask. Motion vector scale (render width, render height), jitter unchanged, sharpness 0, the model as a
+  preset hint for every quality level.
+- NGX rejects the quality value "Ultra Quality" (unsupported parameter): every scale between 1.1 and 1.6 is
+  created as "Quality". With explicit sizes the value only selects defaults inside DLSS.
+- NGX changes the state of the command list it records into. Afterwards the add-on sets the descriptor heaps,
+  both root signatures, the descriptor tables and the pipeline of the game again.
+- A feature is released like an FSR context: once the GPU is idle at `destroy_effect_runtime`, or eight presents
+  after it was replaced. NGX itself ends when the swap chain is destroyed for good.
+- Checked against DLSS through OptiScaler, which the releases up to 1.0.0-beta.2 used: the same recorded
+  sequence of frames gives the same picture, byte for byte, with and without the own sharpening pass.
 
-`NvngxDlssPath` in `OptiScaler.ini` must be the path of the DLL file, not of its folder; the setup tool avoids it
-by placing the DLL next to OptiScaler.
+OptiScaler still works on top of `Upscaler=FSR31`: it recognises AMD's FidelityFX DLLs by file name and detours
+the `ffx*` functions. As `winmm.dll` behind ReShade the game ended right after OptiScaler released the features
+of replaced contexts, which is what `KeepContexts=1` is for (the add-on then never calls `ffxDestroyContext`).
+
+## Reflex (`src/reflex.cpp`)
+
+With `Reflex=1` the add-on tells the driver to use its low latency mode (`NvAPI_D3D_SetSleepMode`) and calls
+`NvAPI_D3D_Sleep` once per frame, right after the swap chain's Present returned (ReShade's `finish_present`).
+A game that supports Reflex calls it before it samples the input; that point is inside the game and out of an
+add-on's reach, so this is the form NVAPI describes as sleeping "at a less optimal point". Nothing is called
+while the setting is off.
+
+With the developer tools on, the frames are also marked for the driver's latency report
+(`NvAPI_D3D_SetLatencyMarker`, the simulation start marker right after the sleep call) and every 300 frames its
+averages go to the log. In the game's benchmark (DLSS K, Balanced, about 84 fps), medians over 34 to 36 reports:
+
+| | Start of frame to end of GPU work | Frame time |
+|---|---|---|
+| Reflex off | 38.3 ms | 11.7 ms |
+| Reflex on | 20.2 ms | 11.7 ms |
+
+"Start of frame" is the add-on's marker, not the game's input sample, and the display is not included.
 
 ## Measurements (November 2026, RTX 3060, 2560x1440, the game's benchmark)
 
-Speed: one benchmark run per setting without any recording; the numbers are in the README.
+Speed: one benchmark run per setting without any recording; the numbers are in the README. The DLSS rows of
+this table were measured with 1.0.0-beta.2, where DLSS ran through OptiScaler.
 
 Picture: every setting was recorded once (desktop capture, 60 fps) and compared with a recording at 200 %
 resolution scale with the game's FSR off. 160 sample frames per recording, aligned in time, 64 pixel tiles

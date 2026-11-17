@@ -1,6 +1,7 @@
 #include "frame.hpp"
 #include "autotest.hpp"
 #include "fsr.hpp"
+#include "reflex.hpp"
 #include "replace.hpp"
 #include "snapshot.hpp"
 #include "record.hpp"
@@ -477,8 +478,10 @@ namespace acv
 				else if (record.valid && (kind == Kind::Fsr1Easu || kind == Kind::Fsr1Rcas) && state.taa_pending_valid)
 				{
 					// FSR 3.1 takes the place of EASU, with the inputs of the TAA draws skipped earlier in this list.
-					// Without the game's sharpening it takes the place of RCAS, and EASU is only skipped.
-					if (kind == Kind::Fsr1Easu && !settings::game_sharpening() && !data.rcas_replace_failed.load(std::memory_order_relaxed))
+					// Without the game's sharpening it takes the place of RCAS, and EASU is only skipped: not before
+					// the upscaler is set up, or RCAS would sharpen an EASU output nobody wrote.
+					if (kind == Kind::Fsr1Easu && !settings::game_sharpening() && !data.rcas_replace_failed.load(std::memory_order_relaxed) &&
+						replace::prepare_fsr1(cmd_list, device, data, state.taa_pending, record, list_state(state)))
 					{
 						skip = true;
 					}
@@ -840,9 +843,20 @@ namespace acv
 					const std::lock_guard<std::mutex> lock(data->published_mutex);
 					data->published = std::move(stats);
 				}
+
+				reflex::before_present(reinterpret_cast<ID3D12Device *>(static_cast<uintptr_t>(swapchain->get_device()->get_native())));
 			});
 
 			log::flush_if_dirty();
+		}
+
+		// After the swap chain's Present returned
+		void on_finish_present(api::command_queue *, api::swapchain *swapchain)
+		{
+			guarded("finish_present", [&]() {
+				if (swapchain != nullptr && device_data(swapchain->get_device()) != nullptr)
+					reflex::after_present(reinterpret_cast<ID3D12Device *>(static_cast<uintptr_t>(swapchain->get_device()->get_native())));
+			});
 		}
 	}
 
@@ -960,6 +974,7 @@ namespace acv
 		reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_or_dispatch_indirect);
 		reshade::register_event<reshade::addon_event::execute_command_list>(on_execute_command_list);
 		reshade::register_event<reshade::addon_event::present>(on_present);
+		reshade::register_event<reshade::addon_event::finish_present>(on_finish_present);
 	}
 	void frame::unregister_events()
 	{
@@ -975,6 +990,7 @@ namespace acv
 		reshade::unregister_event<reshade::addon_event::dispatch>(on_dispatch);
 		reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_or_dispatch_indirect);
 		reshade::unregister_event<reshade::addon_event::execute_command_list>(on_execute_command_list);
+		reshade::unregister_event<reshade::addon_event::finish_present>(on_finish_present);
 		reshade::unregister_event<reshade::addon_event::present>(on_present);
 	}
 

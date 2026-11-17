@@ -232,15 +232,21 @@ namespace acv
 				if (api::command_queue *const queue = runtime->get_command_queue())
 					queue->wait_idle();
 				data->fsr->shutdown();
+				data->rcas_replace_failed.store(false, std::memory_order_relaxed);
 			});
 		}
 
-		void on_destroy_swapchain(api::swapchain *swapchain, bool)
+		void on_destroy_swapchain(api::swapchain *swapchain, bool resize)
 		{
 			guarded("destroy_swapchain", [&]() {
 				DeviceData *const data = device_data(swapchain->get_device());
 				if (data == nullptr)
 					return;
+
+				// 'destroy_effect_runtime' came just before this and released the upscaler. NGX itself stays
+				// across a resize and ends with the swap chain, while the device is still alive.
+				if (!resize)
+					data->fsr->end_dlss(reinterpret_cast<ID3D12Device *>(static_cast<uintptr_t>(swapchain->get_device()->get_native())));
 
 				const std::lock_guard<std::mutex> lock(data->swapchain_mutex);
 				for (auto it = data->back_buffers.begin(); it != data->back_buffers.end();)

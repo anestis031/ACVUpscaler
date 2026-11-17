@@ -24,6 +24,10 @@ cargo build --release
 - `fetch_deps.cmd` clones the ReShade headers (v6.8.0) and the parts of AMD's FidelityFX SDK (v2.4.0) that are
   needed into `external\`. The add-on must be built against the ReShade API version of the ReShade that
   loads it.
+- It also fetches two optional parts from NVIDIA: the headers and the static library of the DLSS SDK 310.9.16
+  (https://github.com/NVIDIA/DLSS, under NVIDIA's DLSS SDK licence) and NVAPI (https://github.com/NVIDIA/nvapi,
+  MIT). Without the first the add-on is built without DLSS (`Upscaler=DLSS` then runs FSR 3.1), without the
+  second without Reflex. CMake says which of the two it found.
 - `build.cmd` builds `build\bin\ACVUpscaler.addon64`, runs the checksum test and copies AMD's two signed DLLs
   next to it.
 - The setup tool ends up in `setup-app\target\release\ACVUpscalerSetup.exe`.
@@ -31,21 +35,20 @@ cargo build --release
 ## The release zip
 
 `tools\package.ps1` builds `dist\ACVUpscaler-<version>.zip`. Besides the two builds above it needs the
-official downloads of the third-party programs in `external\` and refuses to pack anything whose SHA-256
-differs from the values in the script:
+official download of ReShade in `external\` and refuses to pack it when its SHA-256 differs from the value in
+the script:
 
 - `external\reshade_setup\ReShade_Setup_6.8.0_Addon.exe` from https://reshade.me (the build with full add-on
   support)
-- `external\OptiScaler_0.9.4\Optiscaler_0.9.4-final.20260718._MM.7z` from
-  https://github.com/optiscaler/OptiScaler/releases/tag/v0.9.4
 
-It uses the `tar.exe` of Windows 11 to read both.
+It uses the `tar.exe` of Windows 11 to read it.
 
 ## Layout of the source
 
 - `src\`: the ReShade add-on (C++20). `pipelines.*` recognises the game's passes by shader checksum,
   `descriptors.*` and `frame.*` track what each pass has bound, `replace.*` skips the game's TAA and FSR 1 and
-  puts the upscaler in their place, `fsr.*` talks to the FidelityFX API, `overlay.*` is the panel. `snapshot.*`,
+  puts the upscaler in their place, `fsr.*` talks to the FidelityFX API and holds what both upscalers share,
+  `dlss.*` talks to NVIDIA's NGX, `reflex.*` to NVAPI, `overlay.*` is the panel. `snapshot.*`,
   `record.*` and `autotest.*` are the developer tools behind `DevMode=1`.
 - `setup-app\`: the setup tool (Rust, plain Win32 through `windows-sys`). `core.rs` holds the rules for what may
   be added to or removed from the game folder, with tests.

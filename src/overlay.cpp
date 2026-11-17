@@ -3,6 +3,7 @@
 #include "frame.hpp"
 #include "autotest.hpp"
 #include "fsr.hpp"
+#include "reflex.hpp"
 #include "replace.hpp"
 #include "snapshot.hpp"
 #include "record.hpp"
@@ -28,7 +29,10 @@ namespace acv
 		bool game_sharpening = settings::game_sharpening();
 		ImGui::BeginDisabled(!game_pass_exists);
 		if (ImGui::Checkbox("Sharpening pass of the game on top (fixed strength)", &game_sharpening))
+		{
 			settings::set_game_sharpening(game_sharpening);
+			data.rcas_replace_failed.store(false, std::memory_order_relaxed);
+		}
 		ImGui::EndDisabled();
 		const bool own_runs = !game_pass_exists || !game_sharpening;
 		int sharpness = static_cast<int>(settings::sharpness());
@@ -40,6 +44,16 @@ namespace acv
 		ImGui::EndDisabled();
 		ImGui::TextWrapped(own_runs ? "0 is no sharpening, 84 is as strong as the game's pass. Ctrl+click the slider to type a value." :
 			"Untick the game's pass to set the strength yourself.");
+	}
+
+	// Reflex, live. Independent of the replacement: it also works with the add-on switched off.
+	static void draw_reflex()
+	{
+		ImGui::Separator();
+		bool on = settings::reflex();
+		if (ImGui::Checkbox("NVIDIA Reflex low latency (limited form)", &on))
+			settings::set_reflex(on);
+		ImGui::TextWrapped("Reflex: %s. Keeps frames from waiting in a queue while the graphics card is the limit. The game does not support Reflex itself, so the wait sits at the end of the frame, not before the input is read.", reflex::status().c_str());
 	}
 
 	// What a player needs: is it working, on or off, and what to do when something is off
@@ -56,11 +70,13 @@ namespace acv
 		const bool on = mode != static_cast<uint32_t>(ReplaceMode::GameTaa);
 		if (ImGui::RadioButton("Off: the game's own TAA / FSR 1", !on) && on)
 			replace::set_mode(data, ReplaceMode::GameTaa, "overlay");
-		if (ImGui::RadioButton("On: FSR 3.1, or DLSS when OptiScaler is installed", on) && !on)
+		if (ImGui::RadioButton(settings::get().dlss ? "On: DLSS (FSR 3.1 where DLSS cannot run)" : "On: FSR 3.1", on) && !on)
 			replace::set_mode(data, ReplaceMode::Fsr, "overlay");
 
 		ImGui::Text("Status: %s", replace::state(data));
-		ImGui::TextWrapped("Upscaler calls: %s", data.fsr->status().c_str());
+		ImGui::TextWrapped("Upscaler: %s", data.fsr->status().c_str());
+		if (settings::get().dlss)
+			ImGui::TextWrapped("Uses NVIDIA DLSS, through NVIDIA's DLSS SDK. The file nvngx_dlss.dll is NVIDIA's and not part of this add-on.");
 		if (const uint64_t declined = data.declined_lists.load(std::memory_order_relaxed))
 			ImGui::Text("Frames left to the game (camera cuts): %llu", declined);
 		const float frame_ms = data.average_frame_ms.load(std::memory_order_relaxed);
@@ -79,6 +95,7 @@ namespace acv
 		}
 
 		draw_sharpening(data);
+		draw_reflex();
 
 		ImGui::Separator();
 		ImGui::TextWrapped("Other settings: ACVUpscalerSetup.exe (with the game closed). Log: %sacvupscaler.log", log::directory_utf8().c_str());
@@ -212,9 +229,10 @@ namespace acv
 				}
 			}
 			ImGui::Text("replacement: %s", replace::state(*data));
-			ImGui::TextWrapped("FSR: %s", data->fsr->status().c_str());
+			ImGui::TextWrapped("Upscaler: %s", data->fsr->status().c_str());
 			ImGui::TextWrapped("Texture LOD bias this session: %+.2f (follows the render scale of the previous session: restart the game after changing its FSR quality)", static_cast<double>(replace::session_mip_bias()));
 			draw_sharpening(*data);
+			draw_reflex();
 			ImGui::Separator();
 
 			const auto toggle = [data](const char *label, std::atomic<bool> &value) {

@@ -6,10 +6,6 @@ Replaces the anti-aliasing and the FSR 1 upscale of **Assassin's Creed Valhalla*
 > **Beta.** Tested on one PC: Steam version of the game as of November 2026, RTX 3060, 2560x1440, Windows 11.
 > Single-player only, at your own risk.
 
-> **This page describes the version in development.** Its source and its release follow. The release you can
-> download today, 1.0.0-beta.2, runs DLSS through OptiScaler and has no Reflex; the README inside its zip
-> describes it.
-
 Comparison video (4K, watch at 2160p): https://www.youtube.com/watch?v=j24VcwrQKlU
 Recorded with 1.0.0-beta.1: unless a label says otherwise, every upscaled setting has the game's fixed sharpening
 pass on top, which leaves DLSS and FSR 3.1 sharper than FSR 1. Since beta.2 the strength can be set.
@@ -178,9 +174,10 @@ The game's benchmark on an RTX 3060 12 GB (with a small overclock), i7-11700K, 3
 - Single-player only. The mod loads third-party DLLs (ReShade, and with it AMD's FSR 3.1 or NVIDIA's DLSS) into
   a game that runs through Ubisoft Connect; whether that is acceptable for your account is your decision.
 - The DLSS file is not distributed here: the setup tool downloads it from NVIDIA's repository.
-- MIT licence ([LICENSE](LICENSE)) for this project's own code. The add-on file of the version in development
-  also contains NVIDIA's NGX library (DLSS SDK licence) and NVAPI (MIT). Third-party parts are listed in
+- MIT licence ([LICENSE](LICENSE)) for this project's own code. The add-on file also contains NVIDIA's NGX
+  library (DLSS SDK licence) and NVAPI (MIT); these and the other third-party parts are listed in
   [THIRD_PARTY.md](THIRD_PARTY.md). Building from source: [BUILDING.md](BUILDING.md).
 
+This project uses NVIDIA DLSS. DLSS and Reflex are technologies and trademarks of NVIDIA Corporation.
 Assassin's Creed Valhalla is a trademark of Ubisoft. This project is not affiliated with or endorsed by
 Ubisoft, AMD, NVIDIA or the projects named above.
